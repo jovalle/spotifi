@@ -1,0 +1,260 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Actions": [
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/action",
+      "Name": "Love Song",
+      "States": [
+        {
+          "Image": "imgs/unloved",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "imgs/loved",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Toggle the playing track in Spicetify's Loved Songs. Loving also likes the song.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.love"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/like-action",
+      "Name": "Like Song",
+      "States": [
+        {
+          "Image": "imgs/unliked",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "imgs/liked",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Toggle the playing track in Liked Songs. Unliking also removes Love.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.like"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/add-action",
+      "Name": "Add to Playlist",
+      "States": [
+        {
+          "Image": "imgs/add",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "imgs/added",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Open Spicetify's playlist picker for the playing track.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.add"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/seek-forward",
+      "Name": "Seek Forward 10s",
+      "States": [
+        {
+          "Image": "imgs/seek-forward",
+          "ShowTitle": false
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Seek forward 10 seconds.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.seek-forward"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/queue",
+      "Name": "Queue",
+      "States": [
+        {
+          "Image": "imgs/queue",
+          "ShowTitle": false
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Show or hide Spotify\u2019s queue.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.queue"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/spotify",
+      "Name": "Spotify",
+      "States": [
+        {
+          "Image": "imgs/spotify",
+          "ShowTitle": false
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Open Spotify.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.spotify"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/shuffle-disabled",
+      "Name": "Shuffle",
+      "States": [
+        {
+          "Image": "imgs/shuffle-disabled",
+          "ShowTitle": false
+        },
+        {
+          "Image": "imgs/shuffle-enabled",
+          "ShowTitle": false
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Toggle Spotify shuffle.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.shuffle"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "Icon": "imgs/dice-1",
+      "Name": "Randomize",
+      "States": [
+        {
+          "Image": "imgs/dice-1",
+          "ShowTitle": false
+        },
+        {
+          "Image": "imgs/dice-2",
+          "ShowTitle": false
+        },
+        {
+          "Image": "imgs/dice-3",
+          "ShowTitle": false
+        },
+        {
+          "Image": "imgs/dice-4",
+          "ShowTitle": false
+        },
+        {
+          "Image": "imgs/dice-5",
+          "ShowTitle": false
+        },
+        {
+          "Image": "imgs/dice-6",
+          "ShowTitle": false
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Play a random track from a random saved playlist, keeping the shuffle setting.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.randomize"
+    },
+    {
+      "Controllers": [
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/playlists.json",
+        "TriggerDescription": {
+          "Rotate": "Browse playlists",
+          "Push": "Click to toggle membership; double-click to change sorting"
+        }
+      },
+      "Icon": "imgs/add-action",
+      "Name": "Playlist Selector",
+      "States": [
+        {
+          "Image": "imgs/add",
+          "ShowTitle": false
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Rotate to browse playlists; click to toggle the playing track; double-click to change sorting.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.playlists"
+    },
+    {
+      "Controllers": [
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/seek.json",
+        "TriggerDescription": {
+          "Rotate": "Seek backward or forward by 1 second per notch"
+        }
+      },
+      "Icon": "imgs/seek-forward",
+      "Name": "Seek",
+      "States": [
+        {
+          "Image": "imgs/seek-forward",
+          "ShowTitle": false
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "Tooltip": "Turn left to rewind, right to seek forward; 1 second per notch.",
+      "UserTitleEnabled": false,
+      "UUID": "com.jovalle.spotifi.seek"
+    }
+  ],
+  "Author": "Jovalle",
+  "Category": "SpotiFi",
+  "CategoryIcon": "imgs/action",
+  "CodePath": "plugin.js",
+  "Description": "SpotiFi: Higher fidelity UX enhancements for Spotify.",
+  "Icon": "imgs/plugin",
+  "Name": "SpotiFi",
+  "Nodejs": {
+    "Version": "24"
+  },
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "13"
+    }
+  ],
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "7.1"
+  },
+  "UUID": "com.jovalle.spotifi",
+  "Version": "1.6.0.0"
+}

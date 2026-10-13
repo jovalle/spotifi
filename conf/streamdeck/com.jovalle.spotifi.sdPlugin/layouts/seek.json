@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "seek",
+  "items": [
+    {
+      "key": "status",
+      "type": "text",
+      "rect": [
+        8,
+        4,
+        184,
+        24
+      ],
+      "font": {
+        "size": 12
+      },
+      "color": "#b3b3b3",
+      "alignment": "center",
+      "value": "\u2190 1s \u00b7 1s \u2192"
+    },
+    {
+      "key": "position",
+      "type": "text",
+      "rect": [
+        8,
+        32,
+        184,
+        32
+      ],
+      "font": {
+        "size": 21
+      },
+      "alignment": "center",
+      "value": "--:--"
+    },
+    {
+      "key": "progress",
+      "type": "bar",
+      "rect": [
+        8,
+        74,
+        184,
+        16
+      ],
+      "value": 0,
+      "range": {
+        "min": 0,
+        "max": 100
+      },
+      "subtype": 0,
+      "border_w": 0,
+      "bar_bg_c": "#20242b",
+      "bar_fill_c": "0:#22d3ee,0.5:#a78bfa,1:#f472b6"
+    }
+  ]
+}

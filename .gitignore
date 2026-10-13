@@ -1,0 +1,11 @@
+/build/
+/local/
+/.venv/
+/.ruff_cache/
+/.audit/
+*.egg-info/
+__pycache__/
+.DS_Store
+*.log
+*.streamDeckPlugin
+conf/streamdeck/*.sdPlugin/logs/

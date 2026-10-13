@@ -1,0 +1,95 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "playlists",
+  "items": [
+    {
+      "key": "cover",
+      "type": "pixmap",
+      "rect": [
+        8,
+        8,
+        48,
+        48
+      ],
+      "value": "imgs/add-action.png"
+    },
+    {
+      "key": "name",
+      "type": "text",
+      "rect": [
+        64,
+        6,
+        128,
+        28
+      ],
+      "font": {
+        "size": 16,
+        "weight": 600
+      },
+      "alignment": "left",
+      "text-overflow": "ellipsis",
+      "value": "Playlists"
+    },
+    {
+      "key": "status",
+      "type": "text",
+      "rect": [
+        64,
+        34,
+        128,
+        24
+      ],
+      "font": {
+        "size": 13
+      },
+      "color": "#b3b3b3",
+      "alignment": "left",
+      "text-overflow": "ellipsis",
+      "value": "Loading…"
+    },
+    {
+      "key": "membership",
+      "type": "pixmap",
+      "rect": [
+        8,
+        66,
+        24,
+        24
+      ],
+      "value": "imgs/add.png"
+    },
+    {
+      "key": "sort",
+      "type": "text",
+      "rect": [
+        40,
+        66,
+        90,
+        24
+      ],
+      "font": {
+        "size": 12
+      },
+      "color": "#b3b3b3",
+      "alignment": "left",
+      "text-overflow": "ellipsis",
+      "value": "Track first"
+    },
+    {
+      "key": "position",
+      "type": "text",
+      "rect": [
+        132,
+        66,
+        64,
+        24
+      ],
+      "font": {
+        "size": 11
+      },
+      "color": "#b3b3b3",
+      "alignment": "right",
+      "value": ""
+    }
+  ]
+}
