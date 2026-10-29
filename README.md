@@ -80,26 +80,23 @@ On macOS, install [Homebrew](https://brew.sh/) and run:
 brew install just node uv
 xcode-select --install  # if Xcode Command Line Tools are not installed
 uv sync --extra dev
-just dependencies
-open -a Spotify         # sign in before continuing
-just configure
+just configure          # installs missing dependencies
+open -a Spotify         # sign in, then run just configure again
 ```
 
 ## Commands
 
-| Task                | Purpose                                                           |
-| ------------------- | ----------------------------------------------------------------- |
-| `just configure`    | Reconcile the complete supported setup                            |
-| `just dependencies` | Install missing Spotify and Spicetify dependencies                |
-| `just spotify`      | Reconcile managed Spotify extensions                              |
-| `just mini`         | Reconcile the native companion and login startup                  |
-| `just streamdeck`   | Reconcile an installed Stream Deck app's plugin and controls page |
-| `just plan`         | Preview Stream Deck changes without writing them                  |
-| `just test`         | Run JavaScript and Python tests                                   |
-| `just test-mini`    | Build and check the native companion and HTTP bridge              |
-| `just lint`         | Check Python lint and formatting                                  |
-| `just check`        | Run lint, formatting, and regression tests                        |
-| `just build`        | Build a source archive and an installable wheel                   |
+| Command | Purpose |
+| --- | --- |
+| `just configure` | Reconcile dependencies, Spotify, the mini player and an installed Stream Deck |
+| `just check` | Show differences between installed Spotify/Spicetify and the defined modules; returns zero when differences are found; nonzero if inspection fails |
+| `make check` | Run lint, formatting checks and regression tests |
+| `make fmt` | Format and fix Python code |
+| `make lint`, `make test` | Run individual maintenance checks |
+| `make build` | Build a source archive and wheel |
+| `make build-mini`, `make test-mini` | Build and test the macOS companion |
+
+Enhancement modules live in `modules/`; `modules/manifest.json` defines their extension files and load order. `just check` reports missing or retired extensions, configuration paths, bundle wiring and file diffs without changing the installation.
 
 The CLI is available at `bin/spotifi`:
 

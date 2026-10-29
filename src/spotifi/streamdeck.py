@@ -186,7 +186,7 @@ def reconcile(profiles, manifest, template):
             changes[parent] = metadata
     if not list(profiles.glob("*.sdProfile")):
         raise RuntimeError(
-            "Open Stream Deck and create a device profile, then run just streamdeck again."
+            "Open Stream Deck and create a device profile, then run just configure again."
         )
     return changes
 
@@ -232,7 +232,7 @@ def configure(home, app, check=False):
         return 0
     running = app_running()
     if running and not ui.confirm("Stream Deck must restart to apply changes. Restart it now?"):
-        ui.skip("Stream Deck configuration skipped; rerun just streamdeck when ready.")
+        ui.skip("Stream Deck configuration skipped; rerun just configure when ready.")
         return 0
     state = home / "Library/Application Support/spotifi"
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
