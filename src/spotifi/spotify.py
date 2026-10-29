@@ -1,5 +1,6 @@
 """Spotify setup, Spicetify reconciliation, and playback."""
 
+import difflib
 import json
 import os
 import re
@@ -474,6 +475,10 @@ def configure_spicetify(binary, spotify, prefs, force=False):
     if not location:
         raise RuntimeError("Failed to locate the Spicetify configuration.")
     config = Path(location)
+    if not config.is_file():
+        run(binary, "config")
+        if not config.is_file():
+            raise RuntimeError(f"Spicetify did not create its configuration: {config}")
     changed = False
     if not paths_match(config, spotify, prefs):
         run(binary, "config", "spotify_path", spotify, "prefs_path", prefs)
@@ -533,6 +538,105 @@ def survives_relaunch(spotify):
             return False
         time.sleep(0.5)
     return True
+
+
+def check():
+    """Preview differences between declared and installed Spotify enhancements."""
+    paths = spotify_paths()
+    binary = spicetify_binary()
+    if paths is None or binary is None:
+        print("Cannot check: Spotify, its preferences, or Spicetify is unavailable.")
+        return 1
+    spotify, prefs = paths
+    result = run(binary, "-c", check=False)
+    if result.returncode or not result.stdout.strip():
+        print("Cannot check: Spicetify did not report its configuration path.")
+        return 1
+    config = Path(result.stdout.strip())
+    sections = {}
+
+    def add(section, message, code="33"):
+        sections.setdefault(section, []).append((message, code))
+
+    if not config.is_file():
+        add("Configuration", f"Missing Spicetify config: {config}")
+    for key, desired in (("spotify_path", str(spotify)), ("prefs_path", str(prefs))):
+        actual = config_value(config, key) if config.is_file() else ""
+        if actual.rstrip("/") != desired.rstrip("/"):
+            add(
+                "Configuration",
+                f"{key}:\n    installed: {actual or '(unset)'}\n    defined:   {desired}",
+            )
+    index = spotify / "Apps/xpui/index.html"
+    content = index.read_text(errors="replace") if index.is_file() else ""
+    if not index.is_file():
+        add("Spotify bundle", "Missing index.html")
+    elif "spicetifyWrapper.js" not in content or not (
+        index.parent / "helper/spicetifyWrapper.js"
+    ).is_file():
+        add("Spotify bundle", "Missing Spicetify helper")
+    for module, names in MODULES.items():
+        for name in names:
+            section = f"{module} / {name}"
+            if not config.is_file() or not has_extension(config, name):
+                add(section, "Not enabled in Spicetify config")
+            if index.is_file() and "extensions/" + name not in content:
+                add(section, "Not loaded by Spotify bundle")
+            for label, target in (
+                ("Spicetify", config.parent / "Extensions" / name),
+                ("Spotify", spotify / "Apps/xpui/extensions" / name),
+            ):
+                source = EXTENSION_SOURCES[name]
+                if not target.is_file():
+                    add(section, f"Missing from {label}")
+                elif not same_file(source, target):
+                    actual = target.read_text(errors="replace").splitlines()
+                    desired = source.read_text(errors="replace").splitlines()
+                    lines = difflib.unified_diff(
+                        actual,
+                        desired,
+                        fromfile=f"installed ({label})",
+                        tofile=f"defined (modules/{module}/{name})",
+                        lineterm="",
+                    )
+                    add(section, f"Changes for {label}:", "2")
+                    for line in lines:
+                        if line.startswith("@@"):
+                            code = "36"
+                        elif line.startswith("-"):
+                            code = "31"
+                        elif line.startswith("+"):
+                            code = "32"
+                        else:
+                            code = "0"
+                        add(section, line, code)
+    for name in RETIRED:
+        if config.is_file() and has_extension(config, name):
+            add("Retired extensions", f"{name}: still enabled in Spicetify")
+        if index.is_file() and "extensions/" + name in content:
+            add("Retired extensions", f"{name}: still loaded by Spotify")
+    if not mini_bridge(config.parent, spotify, check=True):
+        add("Mini player", "Bridge settings differ or are missing (credentials hidden)")
+    if not sections:
+        print("Spotify configuration and all defined modules are current.")
+        return 0
+
+    color = (
+        sys.stdout.isatty()
+        and os.environ.get("TERM", "dumb") != "dumb"
+        and "NO_COLOR" not in os.environ
+    )
+
+    def paint(text, code):
+        return f"\033[{code}m{text}\033[0m" if color and code != "0" else text
+
+    print(paint("Spotify configuration differences", "1"))
+    for title, entries in sections.items():
+        print("\n" + paint(title, "1;36"))
+        for message, code in entries:
+            print("  " + paint(message, code))
+    print("\nRun " + paint("just configure", "1;35") + " to apply these changes.")
+    return 0
 
 
 def configure(force=False, yes=False):

@@ -156,6 +156,79 @@ class IsolatedSpotify(unittest.TestCase):
 
 
 class SpotifyTests(IsolatedSpotify):
+    def test_check_reports_current_and_file_differences_without_writing(self):
+        self.configured()
+        self.patch("spotify_paths", return_value=(self.spotify, self.prefs))
+        self.patch("spicetify_binary", return_value="spicetify")
+        self.fake_spicetify()
+        self.assertEqual(spotify_api.check(), 0)
+        self.assertIn("all defined modules are current", self.output.getvalue())
+        target = self.spotify / "Apps/xpui/extensions/add.js"
+        target.write_text("old version\n")
+        self.output.seek(0)
+        self.output.truncate()
+        self.assertEqual(spotify_api.check(), 0)
+        self.assertIn("-old version", self.output.getvalue())
+        self.assertIn("modules/library/add.js", self.output.getvalue())
+        self.assertEqual(target.read_text(), "old version\n")
+
+    def test_check_reports_missing_config_and_extension_state(self):
+        self.patch("spotify_paths", return_value=(self.spotify, self.prefs))
+        self.patch("spicetify_binary", return_value="spicetify")
+        self.fake_spicetify()
+        self.assertEqual(spotify_api.check(), 0)
+        self.assertIn(f"Missing Spicetify config: {self.config}", self.output.getvalue())
+        self.assertIn("settings / settings.js", self.output.getvalue())
+        self.assertFalse(self.config.exists())
+
+    def test_check_colors_diffs_on_terminal_and_respects_no_color(self):
+        self.configured()
+        self.patch("spotify_paths", return_value=(self.spotify, self.prefs))
+        self.patch("spicetify_binary", return_value="spicetify")
+        self.fake_spicetify()
+        (self.spotify / "Apps/xpui/extensions/add.js").write_text("old version\n")
+        os.environ["TERM"] = "xterm"
+        with patch.object(self.output, "isatty", return_value=True):
+            self.assertEqual(spotify_api.check(), 0)
+            self.assertIn("\x1b[31m-old version\x1b[0m", self.output.getvalue())
+            self.assertIn("\x1b[1;35mjust configure\x1b[0m", self.output.getvalue())
+            self.output.seek(0)
+            self.output.truncate()
+            os.environ["NO_COLOR"] = "1"
+            self.assertEqual(spotify_api.check(), 0)
+            self.assertNotIn("\x1b[", self.output.getvalue())
+            self.assertIn("Run just configure to apply these changes.", self.output.getvalue())
+
+    def test_check_returns_error_when_inspection_fails(self):
+        self.patch("spotify_paths", return_value=(self.spotify, self.prefs))
+        self.patch("spicetify_binary", return_value="spicetify")
+        self.patch("run", return_value=result(code=1))
+        self.assertEqual(spotify_api.check(), 1)
+        self.assertIn("did not report its configuration path", self.output.getvalue())
+
+    def test_configure_creates_missing_spicetify_config(self):
+        self.calls = []
+
+        def initialize(*args, check=True):
+            if args[1:] == ("config",) and not self.config.exists():
+                self.write_config()
+            return self.spicetify(*args, check=check)
+
+        self.patch("run", side_effect=initialize)
+        spotify_api.configure_spicetify("spicetify", self.spotify, self.prefs)
+        self.assertTrue(self.config.is_file())
+        self.assertIn(("config",), self.calls)
+        self.assertTrue(spotify_api.configuration_is_current("spicetify", self.spotify, self.prefs))
+
+    def test_check_reports_missing_extension_configuration(self):
+        self.configured()
+        self.write_config(spotify_api.EXTENSIONS[1:])
+        self.patch("spotify_paths", return_value=(self.spotify, self.prefs))
+        self.patch("spicetify_binary", return_value="spicetify")
+        self.fake_spicetify()
+        self.assertEqual(spotify_api.check(), 0)
+        self.assertIn("settings / settings.js", self.output.getvalue())
+
     def test_explicit_paths(self):
         os.environ.update(
             SPOTIFI_SPOTIFY_PATH=str(self.spotify), SPOTIFI_SPOTIFY_PREFS=str(self.prefs)

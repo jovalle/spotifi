@@ -17,7 +17,7 @@ def main(argv=None):
         command.add_argument("-y", "--yes", action="store_true")
         if name == "configure":
             command.add_argument("--force", action="store_true")
-    for name in ("open", "stop", "restart"):
+    for name in ("open", "stop", "restart", "check"):
         commands.add_parser(name)
     playback = commands.add_parser("play")
     playback.add_argument(
@@ -45,6 +45,8 @@ def main(argv=None):
         spotify.configure(force=args.command == "apply" or getattr(args, "force", False), yes=True)
         if args.command == "apply":
             mini.mini_reload()
+    elif args.command == "check":
+        return spotify.check()
     elif args.command == "play":
         spotify.play(args.selector, args.mode, args.yes)
     elif args.command == "mini":
