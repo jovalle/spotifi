@@ -4,13 +4,17 @@ const vm = require('node:vm');
 const test = require('node:test');
 const source = fs.readFileSync(`${__dirname}/../../src/spicetify/mini.js`, 'utf8');
 
-function harness() {
+function harness({ stream, player = {}, clock = Date } = {}) {
   const calls = [];
   const reports = [];
-  let resync;
+  const events = new Map();
+  const timers = [];
+  const listen = (type, callback) => events.set(type, [...(events.get(type) || []), callback]);
   const Spicetify = {
     Player: {
       data: { item: { uri: 'spotify:track:first', name: 'First', artists: [], metadata: {} } },
+      addEventListener: listen,
+      ...player,
     },
     Platform: { LocalStorageAPI: { namespace: 'account' } },
   };
@@ -41,18 +45,18 @@ function harness() {
         toggle: () => calls.push('add'),
       },
     },
-    addEventListener() {},
+    addEventListener: listen,
   };
   vm.runInNewContext(source, {
     window,
     Spicetify,
     setTimeout(callback) {
-      resync = callback;
+      timers.push(callback);
     },
     clearTimeout() {},
-    AbortSignal, AbortController,
+    AbortSignal, AbortController, TextDecoder, Date: clock,
     fetch: async (_, options) => {
-      if (!options.body) return new Promise(() => {});
+      if (!options.body) return stream ? { ok: true, body: typeof stream === 'function' ? stream() : stream } : new Promise(() => {});
       reports.push(JSON.parse(options.body));
       return { ok: true, json: async () => ({ commands: [] }) };
     },
@@ -71,7 +75,9 @@ function harness() {
     calls,
     command,
     reports,
-    resync: () => resync(),
+    timers,
+    notify: (type, event) => (events.get(type) || []).forEach((callback) => callback(event)),
+    resync: async () => { window.JshMusic.mini.changed(); await new Promise(setImmediate); },
   };
 }
 
@@ -406,28 +412,121 @@ test('seek dial applies absolute targets once, clamps boundaries and rejects sta
   assert.deepEqual(h.calls, [18000, 11000, 0, 59999]);
 });
 
-test('seek receives commands directly and closes the long poll when Spotify unloads', async () => {
+test('idle state and ordinary playback progress schedule no polling or repeated snapshots', async () => {
+  let now = 100000;
+  let position = 1000;
+  let playing = true;
+  const h = harness({
+    stream: new ReadableStream({ start() {} }),
+    clock: class extends Date { static now() { return now; } },
+    player: { getProgress: () => position, isPlaying: () => playing },
+  });
+  await new Promise(setImmediate);
+  const initial = h.reports.length;
+  for (let i = 0; i < 20; i++) {
+    now += 1000;
+    position += 1000;
+    h.notify('onprogress', { data: position });
+  }
+  await new Promise(setImmediate);
+  assert.equal(h.reports.length, initial, 'natural progress is projected locally');
+  assert.deepEqual(h.timers, [], 'healthy connections need no polling timers');
+  position = 5000;
+  h.notify('onprogress', { data: position });
+  await new Promise(setImmediate);
+  assert.equal(h.reports.at(-1).state.position, 5000, 'external seeking publishes the new position');
+  playing = false;
+  h.notify('onplaypause');
+  await new Promise(setImmediate);
+  assert.equal(h.reports.at(-1).state.playing, false);
+  const paused = h.reports.length;
+  for (let i = 0; i < 20; i++) h.api.changed();
+  await new Promise(setImmediate);
+  assert.equal(h.reports.length, paused, 'unchanged events do not resend snapshots');
+  h.window.JshMusic.like.state = () => true;
+  h.api.changed();
+  await new Promise(setImmediate);
+  assert.equal(h.reports.at(-1).state.liked, true, 'completed curation reads notify the bridge');
+});
+
+test('commands arrive on one persistent stream, including split frames, and unload closes it', async () => {
   const h = harness();
-  let release, unload, signal;
+  let stream, unload, signal;
   const delays = [];
+  const reports = [];
   h.Spicetify.Player.getDuration = () => 60000;
   h.Spicetify.Player.seek = (position) => h.calls.push(position);
-  h.window.addEventListener = (_, callback) => { unload = callback; };
+  h.window.addEventListener = (type, callback) => { if (type === 'pagehide') unload = callback; };
   vm.runInNewContext(source, {
-    window: h.window, Spicetify: h.Spicetify, AbortSignal, AbortController,
+    window: h.window, Spicetify: h.Spicetify, AbortSignal, AbortController, TextDecoder,
     setTimeout: (_, delay) => delays.push(delay), clearTimeout() {},
     fetch: async (url, options) => {
-      if (url.endsWith('/seek')) {
+      if (url.endsWith('/events')) {
         signal = options.signal;
-        return new Promise((resolve) => { release = resolve; });
+        return { ok: true, body: new ReadableStream({ start(controller) { stream = controller; } }) };
       }
+      reports.push(JSON.parse(options.body));
       return { ok: true, json: async () => ({ commands: [] }) };
     },
   });
-  release({ ok: true, json: async () => ({ commands: [{ ...h.command('direct', 'seek'), position: 18000 }] }) });
   await new Promise(setImmediate);
-  assert.deepEqual(h.calls, [18000]);
-  assert.ok(delays.includes(0), 'seek reconnects immediately, independent of the 250ms status loop');
+  const command = { ...h.command('direct', 'seek'), position: 18000 };
+  const frame = JSON.stringify({ commands: [command] }) + '\n';
+  stream.enqueue(new TextEncoder().encode(frame.slice(0, 10)));
+  stream.enqueue(new TextEncoder().encode(frame.slice(10) + frame));
+  await new Promise(setImmediate);
+  assert.deepEqual(h.calls, [18000], 'stream retransmission never executes a command twice');
+  assert.ok(reports.some((report) => report.results.some((result) => result.id === 'direct')));
+  assert.deepEqual(delays, [], 'an idle healthy stream schedules no polling');
   unload();
   assert.equal(signal.aborted, true);
+  stream.close();
+});
+
+test('streamed seek commands serialize and keep only the latest waiting target', async () => {
+  let stream, release;
+  const positions = [];
+  const h = harness({
+    stream: new ReadableStream({ start(controller) { stream = controller; } }),
+    player: {
+      getDuration: () => 60000,
+      async seek(position) {
+        positions.push(position);
+        if (positions.length === 1) await new Promise((resolve) => { release = resolve; });
+      },
+    },
+  });
+  await new Promise(setImmediate);
+  const send = (id, position) => stream.enqueue(new TextEncoder().encode(
+    JSON.stringify({ commands: [{ ...h.command(id, 'seek'), position }] }) + '\n',
+  ));
+  send('first', 1000);
+  await new Promise(setImmediate);
+  send('second', 2000);
+  send('last', 3000);
+  send('first', 1000);
+  await new Promise(setImmediate);
+  assert.deepEqual(positions, [1000]);
+  release();
+  await new Promise(setImmediate);
+  assert.deepEqual(positions, [1000, 3000]);
+  h.notify('pagehide');
+  stream.close();
+});
+
+test('a broken stream reconnects and republishes unchanged state to a restarted companion', async () => {
+  let stream;
+  let connections = 0;
+  const h = harness({ stream: () => new ReadableStream({ start(controller) { stream = controller; connections += 1; } }) });
+  await new Promise(setImmediate);
+  const reports = h.reports.length;
+  stream.close();
+  await new Promise(setImmediate);
+  assert.equal(h.timers.length, 1, 'reconnects are scheduled only after failure');
+  void h.timers[0]();
+  await new Promise(setImmediate);
+  assert.equal(connections, 2);
+  assert.ok(h.reports.length > reports, 'reconnection always sends a fresh initial snapshot');
+  h.notify('pagehide');
+  stream.close();
 });

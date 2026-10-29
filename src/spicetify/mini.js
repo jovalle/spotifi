@@ -34,8 +34,19 @@
   const skip = { __proto__: null, previous: 'back', next: 'next' };
   const seek = { __proto__: null, 'seek-back': 'skipBack', 'seek-forward': 'skipForward' };
   let timer;
-  let seekTimer;
-  const seekAbort = new AbortController();
+  let eventTimer;
+  const connectionAbort = new AbortController();
+  let syncing = false;
+  let dirty = false;
+  let lastState = '';
+  let resultVersion = 0;
+  let sentResults = -1;
+  let connectionVersion = 0;
+  let retryDelay = 1000;
+  let syncRetryDelay = 1000;
+  let progress;
+  let pendingSeek;
+  let seeking = false;
   let stopped = false;
   const namespace = () => Spicetify.Platform?.LocalStorageAPI?.namespace || '';
 
@@ -50,6 +61,7 @@
       supported,
       shuffle: Spicetify.Player.getShuffle?.() ?? null,
       position: Spicetify.Player.getProgress?.() ?? null,
+      playing: Spicetify.Player.isPlaying?.() ?? Spicetify.Player.data?.isPaused === false,
       duration: Spicetify.Player.getDuration?.() ?? null,
       canSeek: supported && Spicetify.Player.data?.restrictions?.canSeek !== false &&
         typeof Spicetify.Player.seek === 'function',
@@ -65,7 +77,7 @@
           .join(', ') ||
         'Artist unavailable',
       album: item?.album?.name || meta.album_title || 'Album unavailable',
-      queueCount: api.play?.queueCount() ?? null,
+      queueCount: api.play?.queueCount?.() ?? null,
       image: (
         meta.image_xlarge_url ||
         meta.image_large_url ||
@@ -157,56 +169,135 @@
       result = { ok: false, message: error.message || 'Could not complete action' };
     }
     results.set(command.id, { id: command.id, ...result });
+    resultVersion += 1;
+    changed();
     if (results.size > 128) {
       const completed = [...results].find(([, value]) => value);
       if (completed) results.delete(completed[0]);
     }
   }
 
-  async function sync() {
+  function changed() {
+    dirty = true;
+    if (!stopped && !syncing && !timer) void sync();
+  }
+
+  async function receive(command) {
+    if (command?.action !== 'seek') return execute(command);
+    if (results.has(command.id)) return;
+    pendingSeek = command;
+    if (seeking) return;
+    seeking = true;
     try {
+      while (pendingSeek && !stopped) {
+        const next = pendingSeek;
+        pendingSeek = null;
+        await execute(next);
+      }
+    } finally { seeking = false; }
+  }
+
+  async function sync() {
+    syncing = true;
+    dirty = false;
+    try {
+      const snapshot = state();
+      const serialized = JSON.stringify(snapshot);
+      const version = resultVersion;
+      const connection = connectionVersion;
+      const sentAt = Date.now();
+      if (serialized === lastState && version === sentResults) return;
       const response = await fetch(`http://127.0.0.1:${bridge.port}/sync`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${bridge.token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: state(), results: [...results.values()].filter(Boolean) }),
-        signal: AbortSignal.timeout(3000),
+        body: JSON.stringify({ state: snapshot, results: [...results.values()].filter(Boolean) }),
+        signal: AbortSignal.any([connectionAbort.signal, AbortSignal.timeout(3000)]),
       });
       if (!response.ok) throw new Error(`Companion returned ${response.status}`);
       const data = await response.json();
+      syncRetryDelay = 1000;
+      if (connection === connectionVersion) {
+        lastState = serialized;
+        sentResults = version;
+      }
+      progress = { uri: snapshot.uri, position: snapshot.position, playing: snapshot.playing, time: sentAt };
       api.mini.shortcuts = data.shortcuts;
-      for (const command of data.commands || []) execute(command);
+      for (const command of data.commands || []) void receive(command);
     } catch {
-      // Companion may be stopped; do not notify or restart Spotify on connection failures.
+      if (!stopped) {
+        timer = setTimeout(() => { timer = null; changed(); }, syncRetryDelay);
+        syncRetryDelay = Math.min(syncRetryDelay * 2, 30000);
+      }
     } finally {
-      if (!stopped) timer = setTimeout(sync, 250);
+      syncing = false;
+      if (dirty && !stopped && !timer) changed();
     }
   }
 
-  api.mini = { state, execute };
-  async function receiveSeek() {
+  async function connect() {
     try {
-      const response = await fetch(`http://127.0.0.1:${bridge.port}/seek`, {
+      const response = await fetch(`http://127.0.0.1:${bridge.port}/events`, {
         headers: { Authorization: `Bearer ${bridge.token}` },
-        signal: AbortSignal.any([seekAbort.signal, AbortSignal.timeout(5000)]),
+        signal: connectionAbort.signal,
       });
-      if (!response.ok) throw new Error('Seek connection unavailable');
-      const data = await response.json();
-      for (const command of data.commands || []) await execute(command);
-      if (!stopped) seekTimer = setTimeout(receiveSeek, 0);
+      if (!response.ok || !response.body) throw new Error('Companion event stream unavailable');
+      retryDelay = 1000;
+      syncRetryDelay = 1000;
+      clearTimeout(timer);
+      timer = null;
+      connectionVersion += 1;
+      lastState = '';
+      changed();
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        while (!stopped) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error('Companion disconnected');
+          buffer += decoder.decode(value, { stream: true });
+          if (buffer.length > 262144) throw new Error('Companion event too large');
+          let boundary;
+          while ((boundary = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 1);
+            if (!line) continue;
+            const data = JSON.parse(line);
+            api.mini.shortcuts = data.shortcuts || api.mini.shortcuts;
+            for (const command of data.commands || []) void receive(command);
+          }
+        }
+      } finally {
+        await reader.cancel().catch(() => {});
+      }
     } catch {
-      if (!stopped) seekTimer = setTimeout(receiveSeek, 1000);
+      // Reconnect only after a broken connection; an idle stream sends no requests.
+      if (!stopped) {
+        eventTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30000);
+      }
     }
   }
+
+  api.mini = { state, execute, changed };
+  for (const event of ['songchange', 'onplaypause']) Spicetify.Player.addEventListener?.(event, changed);
+  for (const event of ['update', 'queue_update'])
+    Spicetify.Platform.PlayerAPI?.getEvents?.()?.addListener?.(event, changed);
+  Spicetify.Player.addEventListener?.('onprogress', ({ data: position }) => {
+    if (!progress || !Number.isFinite(position)) return;
+    const expected = progress.position + (progress.playing ? Date.now() - progress.time : 0);
+    if (Math.abs(position - expected) > 500) changed();
+  });
   window.addEventListener(
     'pagehide',
     () => {
       stopped = true;
       clearTimeout(timer);
-      clearTimeout(seekTimer);
-      seekAbort.abort();
+      clearTimeout(eventTimer);
+      connectionAbort.abort();
     },
     { once: true },
   );
-  sync();
-  receiveSeek();
+  changed();
+  void connect();
 })();

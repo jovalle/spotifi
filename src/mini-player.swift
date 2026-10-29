@@ -207,6 +207,9 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hotkeyEvents = 0
     var snapshot: [String: Any] = [:]
     var lastSync = Date.distantPast
+    var eventConnection: NWConnection?
+    var syncTimeout: DispatchWorkItem?
+    var connected: Bool { eventConnection != nil || Date().timeIntervalSince(lastSync) <= 4 }
     var commands: [[String: Any]] = []
     var pendingSeek: [String: Any]?
     var seekReply: (() -> Void)?
@@ -251,21 +254,25 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             listener?.start(queue: .main)
         } catch { showNotice("Could not start connection: \(error.localizedDescription)") }
-        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            if Date().timeIntervalSince(self.lastSync) > 4 {
-                self.showNotice("Spotify disconnected — actions disabled")
-                self.buttons.forEach { $0.isEnabled = false }
-                self.queueButton.isEnabled = false
-                self.queueBadge.isHidden = true
-            }
-            let now = Date().timeIntervalSince1970 * 1000
-            if self.commands.contains(where: { ($0["expires"] as? Double ?? 0) + 10000 < now }) {
-                let expired = self.commands.filter { ($0["expires"] as? Double ?? 0) + 10000 < now }
-                self.complete(expired.map { ["id": $0["id"]!, "ok": false,
-                    "message": "Action timed out — check Spotify before retrying"] })
-            }
-            self.refreshActionHotkeys()
+    }
+
+    func connectionChanged() {
+        if !connected {
+            showNotice("Spotify disconnected — actions disabled")
+            buttons.forEach { $0.isEnabled = false }
+            queueButton.isEnabled = false
+            queueBadge.isHidden = true
+        }
+        refreshActionHotkeys()
+    }
+
+    func commandQueued(_ command: [String: Any]) {
+        sendEvents()
+        let delay = max(0, (command["expires"] as? Double ?? 0) / 1000 + 10 - Date().timeIntervalSince1970)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.commands.contains(where: { $0["id"] as? String == command["id"] as? String }) else { return }
+            self.complete([["id": command["id"]!, "ok": false,
+                "message": "Action timed out — check Spotify before retrying"]])
         }
     }
 
@@ -441,10 +448,10 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func refreshPendingButtons() {
         renderButtons(displayedState(snapshot, commands))
-        queueButton.isEnabled = Date().timeIntervalSince(lastSync) <= 4 &&
+        queueButton.isEnabled = connected &&
             !(snapshot["account"] as? String ?? "").isEmpty
         let actions = Set(commands.map { $0["action"] as? String ?? "" })
-        let supported = Date().timeIntervalSince(lastSync) <= 4 && snapshot["supported"] as? Bool == true &&
+        let supported = connected && snapshot["supported"] as? Bool == true &&
             !(snapshot["account"] as? String ?? "").isEmpty
         for (index, button) in buttons.enumerated() {
             let pending = index < 2 ? !actions.isDisjoint(with: ["like", "love"]) :
@@ -488,8 +495,20 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
             showNotice("")
             buttons.forEach { $0.layer?.removeAllAnimations() }
         }
+        let previous = snapshot
         snapshot = state
         lastSync = Date()
+        syncTimeout?.cancel()
+        if eventConnection == nil {
+            let timeout = DispatchWorkItem { [weak self] in self?.connectionChanged() }
+            syncTimeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.1, execute: timeout)
+        }
+        if !notice.stringValue.hasPrefix("Spotify disconnected"), !notice.stringValue.hasPrefix("Connecting"),
+           NSDictionary(dictionary: previous.filter { $0.key != "position" }).isEqual(to: state.filter { $0.key != "position" }) {
+            connectionChanged()
+            return
+        }
         let remaining = state["queueCount"] as? Int
         queueBadge.string = remaining.map { String($0) } ?? ""
         queueBadge.isHidden = (remaining ?? 0) <= 0
@@ -524,11 +543,11 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if id == 0 { toggle(); return }
         if id == 18 || id == 19 {
             NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client").first?.activate(options: [])
-            if Date().timeIntervalSince(lastSync) <= 4 { queueAction(id) }
+            if connected { queueAction(id) }
             return
         }
         guard [1, 2, 3, 13, 14, 15, 16, 17].contains(id) else { return }
-        guard panel.isVisible, Date().timeIntervalSince(lastSync) <= 4,
+        guard panel.isVisible, connected,
               snapshot["supported"] as? Bool == true else { showNotice("Play a track in Spotify first"); return }
         let pending = commands.contains { command in
             let action = command["action"] as? String
@@ -548,10 +567,10 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
         queueAction(id)
     }
 
-    func queueAction(_ id: Int) {
+    func queueAction(_ id: Int, action: String? = nil) {
         let removal = snapshot["removal"] as? [String: Any] ?? [:]
         let names = [1: "love", 2: "like", 3: "add", 14: "previous", 15: "next", 16: "seek-back", 17: "seek-forward", 18: "keys", 19: "queue", 20: "shuffle", 21: "randomize"]
-        var command: [String: Any] = ["id": UUID().uuidString, "action": names[id] ?? (removal["action"] as? String ?? "remove"),
+        var command: [String: Any] = ["id": UUID().uuidString, "action": action ?? names[id] ?? (removal["action"] as? String ?? "remove"),
             "removal": removal,
             "uri": snapshot["uri"] as? String ?? "", "account": snapshot["account"] as? String ?? "",
             "expires": Date().timeIntervalSince1970 * 1000 + 5000]
@@ -561,6 +580,7 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if id == 20 { command["value"] = !(snapshot["shuffle"] as? Bool ?? false) }
         commands.append(command)
+        commandQueued(command)
         showNotice("")
         refreshPendingButtons()
     }
@@ -603,7 +623,7 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
         _ = register(18, "/", code: UInt32(kVK_ANSI_Slash))
     }
     func refreshActionHotkeys() {
-        let enabled = panel.isVisible && Date().timeIntervalSince(lastSync) <= 4 && snapshot["supported"] as? Bool == true
+        let enabled = panel.isVisible && connected && snapshot["supported"] as? Bool == true
         guard enabled != visibleActions else { return }
         visibleActions = enabled
         for (id, ref) in shortcuts where id != 0 && id != 18 { UnregisterEventHotKey(ref); shortcuts.removeValue(forKey: id) }
@@ -639,6 +659,7 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func complete(_ results: [[String: Any]]) {
+        guard !results.isEmpty else { return }
         for result in results {
             if let id = result["id"] as? String, let command = commands.first(where: { $0["id"] as? String == id }) {
                 commands.removeAll { $0["id"] as? String == id }
@@ -662,10 +683,13 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func musicResponse(_ request: Request) -> (Int, [String: Any]) {
-        let connected = Date().timeIntervalSince(lastSync) <= 4
         let busy = commands.contains { ["love", "like", "add", "seek-forward", "queue-toggle", "shuffle", "randomize", "playlist"].contains($0["action"] as? String ?? "") }
         if request.method == "GET" {
-            let state = displayedState(snapshot, commands).filter { ["uri", "account", "supported", "loved", "liked", "added", "shuffle", "playlistSelector", "position", "duration", "canSeek"].contains($0.key) }
+            var state = displayedState(snapshot, commands).filter { ["uri", "account", "supported", "loved", "liked", "added", "shuffle", "playlistSelector", "position", "duration", "canSeek"].contains($0.key) }
+            if snapshot["playing"] as? Bool == true, let position = snapshot["position"] as? Double,
+               let duration = snapshot["duration"] as? Double, connected {
+                state["position"] = max(0, min(duration, position + Date().timeIntervalSince(lastSync) * 1000))
+            }
             return (200, ["connected": connected, "busy": busy, "state": state, "results": musicResults])
         }
         guard request.method == "POST" else { return (405, [:]) }
@@ -700,13 +724,13 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let command: [String: Any] = ["id": UUID().uuidString, "action": action, "uri": uri, "account": account,
                 "playlist": playlist, "saved": saved.boolValue, "expires": Date().timeIntervalSince1970 * 1000 + 15000]
             commands.append(command)
+            commandQueued(command)
             return (202, ["id": command["id"]!])
         } else if id == 3 || id == 19 {
             NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client").first?.activate(options: [])
         }
         // Stream Deck uses the same queue even while the panel is hidden.
-        queueAction(id)
-        if id == 19 { commands[commands.count - 1]["action"] = "queue-toggle" }
+        queueAction(id, action: id == 19 ? "queue-toggle" : nil)
         return (202, ["id": commands.last!["id"]!])
     }
 
@@ -716,7 +740,7 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let uri = json["uri"] as? String, let account = json["account"] as? String,
               let position = json["position"] as? NSNumber, CFGetTypeID(position) != CFBooleanGetTypeID(),
               position.doubleValue.isFinite, position.doubleValue >= 0 else { return (400, [:]) }
-        guard Date().timeIntervalSince(lastSync) <= 4, snapshot["supported"] as? Bool == true,
+        guard connected, snapshot["supported"] as? Bool == true,
               snapshot["canSeek"] as? Bool == true else { return (503, [:]) }
         guard !account.isEmpty, account == snapshot["account"] as? String,
               uri == snapshot["uri"] as? String,
@@ -725,14 +749,14 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Only the latest absolute target is needed while Spotify reconnects.
         pendingSeek = ["id": UUID().uuidString, "action": "seek", "uri": uri, "account": account,
                        "position": position.doubleValue, "expires": Date().timeIntervalSince1970 * 1000 + 2000]
-        seekReply?()
+        if eventConnection != nil { sendEvents() } else { seekReply?() }
         return (202, [:])
     }
 
     func takeSeek() -> [[String: Any]] {
         defer { pendingSeek = nil }
         guard let command = pendingSeek,
-              Date().timeIntervalSince(lastSync) <= 4, snapshot["canSeek"] as? Bool == true,
+              connected, snapshot["canSeek"] as? Bool == true,
               (command["expires"] as? Double ?? 0) >= Date().timeIntervalSince1970 * 1000,
               command["uri"] as? String == snapshot["uri"] as? String,
               command["account"] as? String == snapshot["account"] as? String else { return [] }
@@ -746,6 +770,12 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var status = 200
         var payload: [String: Any] = [:]
         if !allowedOrigin { status = 403 }
+        else if request.path == "/events" {
+            if request.method == "OPTIONS" { status = 204 }
+            else if !authenticated { status = 401 }
+            else if request.method != "GET" { status = 405 }
+            else { openEvents(connection, origin: origin); return }
+        }
         else if request.path == "/seek" {
             if request.method == "OPTIONS" { status = 204 }
             else if !authenticated { status = 401 }
@@ -776,7 +806,7 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "handlerInstalled": eventHandler != nil, "hotkeyEvents": hotkeyEvents,
                 "onActiveSpace": panel.isOnActiveSpace,
                 "occluded": !panel.occlusionState.contains(.visible),
-                "connected": Date().timeIntervalSince(lastSync) <= 4,
+                "connected": connected,
                 "bounds": [panel.frame.minX, panel.frame.minY, panel.frame.width, panel.frame.height],
                 "title": title.stringValue, "notice": notice.stringValue]
         }
@@ -794,6 +824,40 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sendResponse(connection, origin: allowedOrigin ? origin : nil, status: status, payload: payload)
     }
 
+    func openEvents(_ connection: NWConnection, origin: String?) {
+        eventConnection?.cancel()
+        eventConnection = connection
+        syncTimeout?.cancel()
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection else { return }
+            switch state {
+            case .failed, .cancelled:
+                guard self.eventConnection === connection else { return }
+                self.eventConnection = nil
+                self.lastSync = .distantPast
+                self.connectionChanged()
+            default: break
+            }
+        }
+        var headers = "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\nCache-Control: no-store\r\n"
+        if let origin { headers += "Access-Control-Allow-Origin: \(origin)\r\nVary: Origin\r\n" }
+        connection.send(content: Data((headers + "\r\n").utf8), completion: .contentProcessed { error in
+            if error != nil { connection.cancel() }
+        })
+        sendEvents()
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, _, _ in connection.cancel() }
+    }
+
+    func sendEvents() {
+        guard let connection = eventConnection else { return }
+        let payload: [String: Any] = ["commands": commands + takeSeek(),
+            "shortcuts": ["modifiers": shortcutLabel(""), "keys": keys]]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        connection.send(content: data + Data([10]), completion: .contentProcessed { error in
+            if error != nil { connection.cancel() }
+        })
+    }
+
     func sendResponse(_ connection: NWConnection, origin: String?, status: Int, payload: [String: Any]) {
         let body = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
         var headers = "HTTP/1.1 \(status) Response\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\n"
@@ -804,6 +868,7 @@ final class Mini: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        eventConnection?.cancel(); syncTimeout?.cancel()
         seekTimeout?.cancel(); seekReply?()
         save(); listener?.cancel(); imageTask?.cancel()
         for ref in shortcuts.values { UnregisterEventHotKey(ref) }
@@ -876,6 +941,11 @@ if CommandLine.arguments.dropFirst().first == "--validate-config" {
         assert(mini.musicResponse(loveRequest(loveBody)).0 == 503)
         mini.update(initial)
         let content = mini.panel.contentView!
+        mini.lastSync = .distantPast
+        mini.connectionChanged()
+        assert(!mini.buttons[0].isEnabled)
+        mini.update(initial)
+        assert(mini.buttons[0].isEnabled && mini.notice.stringValue.isEmpty, "reconnecting must restore an unchanged track")
         let menu = content.menu!
         assert(menu.items.map(\.title) == ["Hide Mini Player", "Always on Top"])
         let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],

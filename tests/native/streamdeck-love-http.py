@@ -5,6 +5,7 @@ Run: python3 tests/native/streamdeck-love-http.py /path/to/compiled/mini
 
 import json
 import pathlib
+import select
 import subprocess
 import sys
 import tempfile
@@ -221,6 +222,58 @@ with tempfile.TemporaryDirectory(prefix="streamdeck-love-http-") as directory:
         assert sync["commands"][0]["action"] == "queue-toggle"
         request("/sync", {"state": state, "results": [{"id": accepted["id"], "ok": True}]})
         assert request("/love", {**body, "action": "unknown"})[0] == 400
+        assert request("/events", auth=False)[0] == 401
+        assert request("/events", origin="https://malicious.example")[0] == 403
+        assert request("/events", {}, method="POST")[0] == 405
+        state.update(
+            uri="spotify:track:test",
+            supported=True,
+            canSeek=True,
+            playing=True,
+            position=1000,
+            duration=60000,
+        )
+        request("/sync", {"state": state, "results": []})
+        event_request = urllib.request.Request(
+            "http://127.0.0.1:47685/events",
+            headers={"Authorization": "Bearer " + token, "Origin": "https://xpui.app.spotify.com"},
+        )
+        with urllib.request.urlopen(event_request, timeout=10) as stream:
+            assert stream.headers["Content-Type"] == "application/x-ndjson"
+            assert stream.headers["Access-Control-Allow-Origin"] == "https://xpui.app.spotify.com"
+            initial = json.loads(stream.readline())
+            assert initial["commands"] == [] and initial["shortcuts"]["keys"]
+            assert not select.select([stream], [], [], 5)[0], (
+                "an idle stream must not send periodic snapshots"
+            )
+            _, idle = request("/love")
+            assert idle["connected"], (
+                "a paused/idle stream must remain connected without sync polling"
+            )
+            assert idle["state"]["position"] >= 6000, (
+                "playback progress advances locally without state polling"
+            )
+            started = time.perf_counter()
+            status, accepted = request("/love", {**body, "uri": state["uri"]})
+            assert status == 202
+            pushed = json.loads(stream.readline())["commands"]
+            assert pushed[0]["action"] == "queue-toggle" and pushed[0]["id"] == accepted["id"]
+            assert (time.perf_counter() - started) < 0.2, (
+                "commands must be pushed without polling delay"
+            )
+            request("/sync", {"state": state, "results": [{"id": accepted["id"], "ok": True}]})
+            assert request("/seek", {**seek_body, "uri": state["uri"], "position": 20000})[0] == 202
+            pushed = json.loads(stream.readline())["commands"]
+            assert pushed[0]["action"] == "seek" and pushed[0]["position"] == 20000
+        for _ in range(40):
+            if not request("/love")[1]["connected"]:
+                break
+            time.sleep(0.025)
+        else:
+            raise AssertionError("closing the event stream must immediately disable actions")
+        print(
+            "Persistent event stream: no idle polling, immediate commands/seeks, local progress and disconnect detection passed"
+        )
         print(
             "HTTP bridge authentication, origin, hidden panel, toggle and acknowledgement checks passed"
         )
