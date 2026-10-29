@@ -21,10 +21,12 @@
   let scanQueued = false;
   let loaded = false;
   let loveRead = 0;
+  let playlistLookup = null;
 
   const loveStyle = document.createElement('style');
   loveStyle.textContent = `
     .${LOVE_CLASS} { align-items: center; align-self: center; background: none; border: 0; color: var(--spice-subtext); cursor: pointer; display: inline-flex; flex-shrink: 0; height: var(--jsh-button-height, 16px); justify-content: center; padding: 0 !important; box-sizing: border-box; position: relative; vertical-align: middle; width: var(--jsh-button-width, 16px); z-index: 1; }
+    .main-trackList-rowSectionEnd:has([role="switch"]) .${LOVE_CLASS} { margin-inline-start: 8px; }
     .${LOVE_CLASS}:focus-visible { outline: 2px solid var(--spice-text); outline-offset: 2px; }
     .${LOVE_CLASS}:hover { color: var(--spice-text); }
     .${LOVE_CLASS}[aria-pressed="true"] { color: #e22134; }
@@ -84,16 +86,24 @@
     const icon = button.querySelector('svg');
     if (!icon || !button.offsetWidth || !button.offsetHeight) return;
     const size = getComputedStyle(icon);
-    custom.style.setProperty('--jsh-button-width', `${button.offsetWidth}px`);
-    custom.style.setProperty('--jsh-button-height', `${button.offsetHeight}px`);
-    custom.style.setProperty('--jsh-icon-width', size.width);
-    custom.style.setProperty('--jsh-icon-height', size.height);
     const gap = button.closest('.main-trackList-rowSectionEnd') ? 8 : 4;
-    custom.style.setProperty(
-      'margin-inline-end',
-      `${gap - (button.offsetWidth - parseFloat(size.width))}px`,
-      'important',
-    );
+    for (const [property, value, priority] of [
+      ['--jsh-button-width', `${button.offsetWidth}px`, ''],
+      ['--jsh-button-height', `${button.offsetHeight}px`, ''],
+      ['--jsh-icon-width', size.width, ''],
+      ['--jsh-icon-height', size.height, ''],
+      [
+        'margin-inline-end',
+        `${gap - (button.offsetWidth - parseFloat(size.width))}px`,
+        'important',
+      ],
+    ]) {
+      if (
+        custom.style.getPropertyValue(property) !== value ||
+        custom.style.getPropertyPriority(property) !== priority
+      )
+        custom.style.setProperty(property, value, priority);
+    }
     if (!observedButtons.has(button)) {
       sizeObserver.observe(button);
       observedButtons.add(button);
@@ -120,7 +130,7 @@
       if (
         item?.type === 'playlist' &&
         item.name === PLAYLIST_NAME &&
-        (item.isOwnedBySelf ?? item.ownedBySelf) !== false &&
+        (item.isOwnedBySelf ?? item.ownedBySelf) === true &&
         item.uri?.startsWith('spotify:playlist:')
       ) {
         return item.uri;
@@ -131,10 +141,25 @@
     return null;
   }
 
+  function ensurePlaylist() {
+    playlistLookup ||= (async () => {
+      const root = await RootlistAPI.getContents();
+      const items = root?.items || root?.rows;
+      if (!Array.isArray(items)) throw new Error('Could not read the Spotify library');
+      const uri =
+        findPlaylist(items) || (await RootlistAPI.createPlaylist(PLAYLIST_NAME, { after: 'end' }));
+      if (!uri?.startsWith('spotify:playlist:'))
+        throw new Error(`Could not create ${PLAYLIST_NAME}`);
+      return uri;
+    })().finally(() => {
+      playlistLookup = null;
+    });
+    return playlistLookup;
+  }
+
   async function loadLoved() {
     const request = ++loveRead;
-    const root = await RootlistAPI.getContents();
-    const uri = findPlaylist(root?.items || root?.rows);
+    const uri = await ensurePlaylist();
     const uids = new Map();
     if (uri) {
       const contents = await PlaylistAPI.getContents(uri, { limit: 10000, offset: 0 });
@@ -143,12 +168,13 @@
         uids.set(item.uri, [...(uids.get(item.uri) || []), item.uid]);
       }
     }
-    if (request !== loveRead) return;
+    if (request !== loveRead) return uri;
     playlistUri = uri;
     lovedUids.clear();
     for (const [trackUri, trackUids] of uids) lovedUids.set(trackUri, trackUids);
     loaded = true;
     scheduleScan();
+    return uri;
   }
 
   function scheduleRefresh() {
@@ -205,10 +231,6 @@
           }
           window.JshMusic.like.refresh(uri, true);
           job.check();
-          if (!playlistUri)
-            playlistUri = await RootlistAPI.createPlaylist(PLAYLIST_NAME, { after: 'end' });
-          if (!playlistUri) throw new Error(`Could not create ${PLAYLIST_NAME}`);
-          job.check();
           if (!lovedUids.has(uri)) {
             await PlaylistAPI.add(playlistUri, [uri], { after: 'end' });
             // Read actual UIDs before the next queued click can remove this entry.
@@ -251,11 +273,13 @@
     }
     sizeLikeNative(heart, button);
     const previousUri = heart.dataset.uri;
-    heart.dataset.uri = uri;
+    if (previousUri !== uri) heart.dataset.uri = uri;
     const value = window.JshMusic.curation.preview(uri).loved;
     const busy = window.JshMusic.curation.busy(uri);
-    heart.setAttribute('aria-busy', String(busy));
-    heart.setAttribute('aria-disabled', 'false');
+    if (heart.getAttribute('aria-busy') !== String(busy))
+      heart.setAttribute('aria-busy', String(busy));
+    if (heart.getAttribute('aria-disabled') !== 'false')
+      heart.setAttribute('aria-disabled', 'false');
     const loved =
       typeof value === 'boolean'
         ? String(value)
@@ -288,6 +312,7 @@
   }
 
   function scheduleScan() {
+    window.JshMusic?.mini?.changed?.();
     if (scanQueued) return;
     scanQueued = true;
     requestAnimationFrame(scanCurationButtons);
@@ -321,8 +346,43 @@
     api.getEvents?.()?.addListener?.('operation_complete', scheduleRefresh);
   }
   Spicetify.Player.addEventListener('songchange', scheduleScan);
-  new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
-  loadLoved().catch(() => scheduleScan());
+  new MutationObserver((records) => {
+    if (
+      records.some(
+        ({ target, addedNodes, removedNodes }) =>
+          target.closest?.('button[aria-checked]') ||
+          [...addedNodes, ...removedNodes].some(
+            (node) =>
+              node.nodeType === 1 &&
+              (node.matches('button[aria-checked], .jsh-love-button') ||
+                node.querySelector('button[aria-checked], .jsh-love-button')),
+          ),
+      )
+    )
+      scheduleScan();
+  }).observe(document.body, { childList: true, subtree: true });
+  loadLoved()
+    .then(async (uri) => {
+      const likedUri = 'spotify:collection:tracks';
+      await LibraryAPI.pin(likedUri, { before: 'start' });
+      await LibraryAPI.pin(uri, { after: { uri: likedUri } });
+      const pinned = await LibraryAPI.getIsPinned(likedUri, uri);
+      // Spotify 1.3.6 returns [] for every URI, so only an explicit false is a failure.
+      if (pinned.includes(false)) throw new Error('Could not pin Liked Songs and Loved Songs');
+      if (!window.JshLovedCover?.startsWith('data:image/jpeg;base64,'))
+        throw new Error('Loved Songs cover is missing');
+      const response = await fetch(window.JshLovedCover);
+      if (!response.ok) throw new Error('Could not load Loved Songs cover');
+      const cover = await response.blob();
+      const imageUploadToken = await PlaylistAPI.uploadImage(cover);
+      if (!imageUploadToken) throw new Error('Could not upload Loved Songs cover');
+      await PlaylistAPI.updateDetails(uri, { imageUploadToken });
+    })
+    .catch((error) => {
+      console.error('[love] Failed to configure Loved Songs', error);
+      Spicetify.showNotification('Could not configure Loved Songs; check Spotify', true);
+      scheduleScan();
+    });
 
   const isMac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform);
   const handledEvents = new WeakSet();
@@ -362,7 +422,10 @@
   window.addEventListener('keydown', handleShortcut, true);
   window.JshMusic ||= {};
   window.JshMusic.love = {
-    playlistUri: async () => { await loadLoved(); return playlistUri; },
+    playlistUri: async () => {
+      await loadLoved();
+      return playlistUri;
+    },
     toggle: toggleLoved,
     clear: clearLoved,
     render: scheduleScan,

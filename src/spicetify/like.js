@@ -73,16 +73,18 @@
     const icon = button.querySelector('svg');
     if (!icon || !button.offsetWidth || !button.offsetHeight) return;
     const size = getComputedStyle(icon);
-    custom.style.setProperty('--jsh-button-width', `${button.offsetWidth}px`);
-    custom.style.setProperty('--jsh-button-height', `${button.offsetHeight}px`);
-    custom.style.setProperty('--jsh-icon-width', size.width);
-    custom.style.setProperty('--jsh-icon-height', size.height);
     const gap = button.closest('.main-trackList-rowSectionEnd') ? 8 : 4;
-    custom.style.setProperty(
-      'margin-inline-end',
-      `${gap - (button.offsetWidth - parseFloat(size.width))}px`,
-      'important',
-    );
+    for (const [property, value, priority] of [
+      ['--jsh-button-width', `${button.offsetWidth}px`, ''],
+      ['--jsh-button-height', `${button.offsetHeight}px`, ''],
+      ['--jsh-icon-width', size.width, ''],
+      ['--jsh-icon-height', size.height, ''],
+      ['margin-inline-end', `${gap - (button.offsetWidth - parseFloat(size.width))}px`, 'important'],
+    ]) {
+      if (custom.style.getPropertyValue(property) !== value ||
+          custom.style.getPropertyPriority(property) !== priority)
+        custom.style.setProperty(property, value, priority);
+    }
     if (!observedButtons.has(button)) {
       sizeObserver.observe(button);
       observedButtons.add(button);
@@ -236,11 +238,13 @@
     }
     sizeLikeNative(star, button);
     const previousUri = star.dataset.uri;
-    star.dataset.uri = uri;
+    if (previousUri !== uri) star.dataset.uri = uri;
     const value = curationPreview(uri).liked;
     const busy = curationJobs.some((job) => job.uri === uri);
-    star.setAttribute('aria-busy', String(busy));
-    star.setAttribute('aria-disabled', 'false');
+    if (star.getAttribute('aria-busy') !== String(busy))
+      star.setAttribute('aria-busy', String(busy));
+    if (star.getAttribute('aria-disabled') !== 'false')
+      star.setAttribute('aria-disabled', 'false');
     const liked =
       typeof value === 'boolean'
         ? String(value)
@@ -269,6 +273,7 @@
   }
 
   function scheduleScan() {
+    window.JshMusic?.mini?.changed?.();
     if (scanQueued) return;
     scanQueued = true;
     requestAnimationFrame(scanCurationButtons);
@@ -305,7 +310,13 @@
     scheduleScan();
   });
   Spicetify.Player.addEventListener('songchange', scheduleScan);
-  new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
+  new MutationObserver((records) => {
+    if (records.some(({ target, addedNodes, removedNodes }) =>
+      target.closest?.('button[aria-checked]') ||
+      [...addedNodes, ...removedNodes].some((node) => node.nodeType === 1 &&
+        (node.matches('button[aria-checked], .jsh-like-button') || node.querySelector('button[aria-checked], .jsh-like-button')))))
+      scheduleScan();
+  }).observe(document.body, { childList: true, subtree: true });
   scheduleScan();
 
   const isMac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform);

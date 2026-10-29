@@ -21,6 +21,7 @@ EXTENSIONS = (
     "add.js",
     "play.js",
     "like.js",
+    "loved-cover.js",
     "love.js",
     "lyrics.js",
     "mini.js",

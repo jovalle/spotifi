@@ -36,7 +36,7 @@ Love a song? Adds to your Loved Songs playlist.
 
 Like a song? Stars and adds to your Liked Songs playlist.
 
-Song already in a playlist? Plus / green checkmark, click to see/choose where.
+Song already in a playlist other than Liked Songs or Loved Songs? Green checkmark; otherwise, plus. Click to see/choose where.
 
 ![Love/Like/Add](assets/traffic-light-controls.png)
 

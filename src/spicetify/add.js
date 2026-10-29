@@ -65,7 +65,8 @@
     if (
       validSelection(playing) &&
       api?.getMetadata &&
-      (!capabilities || capabilities.key !== key || Date.now() - capabilities.time > 30000)
+      (!capabilities || capabilities.key !== key ||
+        (capabilities.value === null && Date.now() - capabilities.time > 30000))
     ) {
       const request = { key, time: Date.now(), value: null };
       capabilities = request;
@@ -73,8 +74,11 @@
         .getMetadata(playing.context)
         .then((value) => {
           request.value = value;
+          window.JshMusic?.mini?.changed?.();
         })
-        .catch(() => {});
+        .catch(() => {
+          setTimeout(() => { if (capabilities === request) window.JshMusic?.mini?.changed?.(); }, 30000);
+        });
     }
     const permissions = capabilities?.key === key ? capabilities.value : null;
     return {
@@ -251,11 +255,23 @@
     } finally {
       removalBusy = false;
       observeRemoval();
+      invalidateMemberships();
     }
   }
 
   const addStyle = document.createElement('style');
-  addStyle.textContent = '.jsh-like-button + button[aria-checked] { opacity: 1 !important; }';
+  addStyle.textContent = `
+    .jsh-like-button + button[aria-checked] { opacity: 1 !important; }
+    button[data-jsh-added="false"] { color: var(--spice-subtext, #b3b3b3) !important; }
+    button[data-jsh-added="true"] { color: #1ed760 !important; }
+    button[data-jsh-added="false"] svg { --encore-icon-fill: var(--spice-subtext, #b3b3b3); }
+    button[data-jsh-added="true"] svg { --encore-icon-fill: #1ed760; }
+    button[data-jsh-added] svg path { fill: currentColor; }
+    button[data-jsh-added] svg path ~ path { display: none; }
+    button[data-jsh-added] svg[viewBox="0 0 24 24"] path { transform: scale(1.5); }
+    button[data-jsh-added="false"] svg path { d: path("M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0-1a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm-.75 4h1.5v3.25H12v1.5H8.75V12h-1.5V8.75H4v-1.5h3.25V4z"); }
+    button[data-jsh-added="true"] svg path { d: path("M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-4.146-2.146-1.061-1.061L6.5 9.086 4.707 7.293 3.646 8.354 6.5 11.207l5.354-5.353z"); }
+  `;
   document.head.append(addStyle);
 
   function normalize(value) {
@@ -320,7 +336,7 @@
   }
 
   function getCurationAPI() {
-    return Object.values(Spicetify.Platform).find(
+    return Object.values(Spicetify.Platform || {}).find(
       (api) =>
         api &&
         typeof api.getCurationContexts === 'function' &&
@@ -338,7 +354,7 @@
 
   async function loadWithCurationAPI(itemUri, curationAPI) {
     const items = [];
-    for (let offset = 0; ; offset += 1000) {
+    for (let offset = 0; ;) {
       const response = await curationAPI.getCurationContexts({
         curatedItemUri: itemUri,
         flatten: true,
@@ -347,10 +363,14 @@
         offset,
       });
       if (!Array.isArray(response?.items)) throw new Error('Playlist membership unavailable');
+      if (!response.items.length && Number.isFinite(response.totalLength) && items.length < response.totalLength)
+        throw new Error('Playlist membership incomplete');
       if (offset && response.items[0]?.uri && items.some((item) => item?.uri === response.items[0].uri))
         throw new Error('Spotify did not paginate playlists');
       items.push(...response.items);
-      if (!response.items.length || items.length >= response.totalLength || response.items.length < 1000) break;
+      if (!response.items.length || (Number.isFinite(response.totalLength)
+        ? items.length >= response.totalLength : response.items.length < 1000)) break;
+      offset += response.items.length;
     }
 
     return uniquePlaylists(
@@ -495,7 +515,8 @@
       selector = { key, uri, account: account(), playlists: [], updated: 0, loading: false, busy: false, revision: 0, error: '' };
     const current = selector;
     const supported = current.account && isTrack(uri) && !Spicetify.Player.data?.item?.metadata?.is_advertisement;
-    if (supported && !current.loading && !current.busy && Date.now() - current.updated > 10000) {
+    if (supported && !current.loading && !current.busy &&
+        (!current.updated || (current.error && Date.now() - current.updated > 10000))) {
       current.loading = true;
       current.updated = Date.now();
       const curationAPI = getCurationAPI();
@@ -507,7 +528,13 @@
         current.playlists = playlists;
         current.error = '';
       }).catch((error) => { if (revision === current.revision) current.error = error.message || 'Could not load playlists'; })
-        .finally(() => { current.loading = false; });
+        .finally(() => {
+          current.loading = false;
+          window.JshMusic?.mini?.changed?.();
+          if (current.error) setTimeout(() => {
+            if (selector === current) window.JshMusic?.mini?.changed?.();
+          }, 10000);
+        });
     }
     return { playlists: supported ? current.playlists.map(({ uri, name, saved, image, recent }) => ({
       uri, name, saved, image: image?.replace('spotify:image:', 'https://i.scdn.co/image/'), recent,
@@ -546,6 +573,7 @@
       return { ok: true, message: '' };
     } finally {
       current.busy = false;
+      invalidateMemberships();
     }
   }
 
@@ -832,6 +860,7 @@
         Spicetify.showNotification(`Could not update ${playlist.name}`, true);
       } finally {
         playlist.busy = false;
+        invalidateMemberships();
         updateRow(playlist, currentItemUri === targetItemUri && playlist.saved !== wasSaved);
       }
     }
@@ -1099,32 +1128,73 @@
     return null;
   }
 
-  function scanNativeAddButtons() {
-    addScanQueued = false;
-    for (const button of document.querySelectorAll('button[aria-checked="false"]')) {
-      if (curationTarget(button) && button.ariaLabel !== ADD_LABEL) {
-        button.setAttribute('aria-label', ADD_LABEL);
-      }
-    }
-  }
+  const memberships = new Map();
+  let membershipAccount = '';
 
   function savedState(uri) {
-    let fallback;
-    for (const button of document.querySelectorAll('button[aria-checked]')) {
-      if (curationTarget(button)?.uri !== uri) continue;
-      const checked = button.getAttribute('aria-checked');
-      if (!['true', 'false'].includes(checked)) continue;
-      const value = checked === 'true';
-      if (button.closest('[class*="nowPlaying"]')) return value;
-      fallback ??= value;
+    if (!isTrack(uri) || !account()) return undefined;
+    if (membershipAccount !== account()) {
+      memberships.clear();
+      membershipAccount = account();
     }
-    return fallback;
+    let current = memberships.get(uri);
+    if (!current || (!current.loading &&
+        (current.dirty || ((current.value === undefined || current.failed) && Date.now() - current.updated > 10000)))) {
+      const curationAPI = getCurationAPI();
+      if (!curationAPI) return undefined;
+      current = { updated: Date.now(), loading: true, value: current?.value };
+      memberships.set(uri, current);
+      if (memberships.size > 200) memberships.delete(memberships.keys().next().value);
+      const request = current;
+      loadWithCurationAPI(uri, curationAPI).then(async (playlists) => {
+        let loved = null;
+        if (playlists.some((item) => item.name === 'Loved Songs' && item.saved !== false)) {
+          if (!window.JshMusic?.love?.playlistUri) throw new Error('Loved Songs unavailable');
+          loved = await window.JshMusic.love.playlistUri();
+        }
+        const others = playlists.filter((item) => item.uri !== 'spotify:playlist:37i9dQZF1F5p3rmiWPIYgZ' && item.uri !== loved);
+        const value = others.some((item) => item.saved === true) ? true :
+          others.every((item) => item.saved === false) ? false : undefined;
+        if (typeof value === 'boolean') request.value = value;
+        else request.failed = true;
+      }).catch(() => { request.failed = true; }).finally(() => {
+        request.loading = false;
+        scheduleAddScan();
+        if (request.failed) setTimeout(() => {
+          if (memberships.get(uri) === request) scheduleAddScan();
+        }, 10000);
+      });
+    }
+    return current.value;
+  }
+
+  function scanNativeAddButtons() {
+    addScanQueued = false;
+    for (const button of document.querySelectorAll('button[aria-checked]')) {
+      const target = curationTarget(button);
+      if (!target) continue;
+      const added = String(savedState(target.uri) === true);
+      if (button.getAttribute('data-jsh-added') !== added) button.setAttribute('data-jsh-added', added);
+      if (button.getAttribute('aria-checked') !== added) button.setAttribute('aria-checked', added);
+      if (button.ariaLabel !== ADD_LABEL) button.setAttribute('aria-label', ADD_LABEL);
+    }
   }
 
   function scheduleAddScan() {
+    window.JshMusic?.mini?.changed?.();
     if (addScanQueued) return;
     addScanQueued = true;
     requestAnimationFrame(scanNativeAddButtons);
+  }
+
+  function invalidateMemberships() {
+    capabilities = null;
+    for (const current of memberships.values()) current.dirty = true;
+    if (selector && !selector.busy) {
+      selector.updated = 0;
+      selector.revision += 1;
+    }
+    scheduleAddScan();
   }
 
   function relabelAddTooltip() {
@@ -1137,7 +1207,7 @@
     'click',
     (event) => {
       const button =
-        event.target instanceof Element && event.target.closest('button[aria-checked="false"]');
+        event.target instanceof Element && event.target.closest('button[aria-checked]');
       const target = button && curationTarget(button);
       if (!target?.openMenu) return;
       event.preventDefault();
@@ -1161,15 +1231,23 @@
     'pointerover',
     (event) => {
       const button =
-        event.target instanceof Element && event.target.closest('button[aria-checked="false"]');
+        event.target instanceof Element && event.target.closest('button[aria-checked]');
       hoveredAddButton = button && curationTarget(button) ? button : null;
     },
     true,
   );
-  new MutationObserver(() => {
+  for (const api of [Spicetify.Platform?.PlaylistAPI, Spicetify.Platform?.LibraryAPI, Spicetify.Platform?.RootlistAPI, getCurationAPI()]) {
+    api?.getEvents?.()?.addListener?.('operation_complete', invalidateMemberships);
+  }
+  Spicetify.Platform?.LibraryAPI?.getEvents?.()?.addListener?.('update_item', invalidateMemberships);
+  new MutationObserver((records) => {
     relabelAddTooltip();
-    scheduleAddScan();
-  }).observe(document.body, { childList: true, subtree: true });
+    if (records.some(({ type, target, addedNodes, removedNodes }) =>
+      type === 'attributes' || target.closest?.('button[aria-checked]') ||
+      [...addedNodes, ...removedNodes].some((node) => node.nodeType === 1 &&
+        (node.matches('button[aria-checked]') || node.querySelector('button[aria-checked]')))))
+      scheduleAddScan();
+  }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-checked'] });
   scheduleAddScan();
 
   function injectContextItem(targetUri) {

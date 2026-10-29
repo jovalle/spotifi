@@ -21,11 +21,12 @@ test('native plus opens the playlist menu on macOS', () => {
   let menuEvent;
   class Element {
     closest(selector) {
-      return selector === 'button[aria-checked="false"]' ? this : null;
+      return selector === 'button[aria-checked]' ? this : null;
     }
   }
   const button = new Element();
   button.isConnected = true;
+  button.getAttribute = () => null;
   button.__reactFiber$test = {
     memoizedProps: {
       curateDefault() {},
@@ -85,8 +86,10 @@ test('native plus opens the playlist menu on macOS', () => {
   assert.equal(shortcuts[0].meta, true);
 });
 
-function addHarness(buttons = []) {
-  const Platform = { LocalStorageAPI: { namespace: 'first-account' } };
+function addHarness(buttons = [], options = {}) {
+  const Platform = { LocalStorageAPI: { namespace: 'first-account' }, ...options.Platform };
+  const observers = [];
+  let scanCount = 0;
   const Spicetify = {
     Platform,
     Player: { data: { item: { uri: 'spotify:track:first' } } },
@@ -103,36 +106,76 @@ function addHarness(buttons = []) {
       createElement: () => ({}),
       head: { append() {} },
       body: {},
-      querySelectorAll: () => buttons,
+      querySelectorAll: () => { scanCount += 1; return buttons; },
     },
     navigator: { platform: 'MacIntel' },
     MutationObserver: class {
+      constructor(callback) { observers.push(callback); }
       observe() {}
     },
     requestAnimationFrame: (callback) => callback(),
+    Date: options.Date || Date,
+    setTimeout: () => 0,
   });
-  return { api: window.JshMusic.add, Platform, Spicetify };
+  return { api: window.JshMusic.add, window, Platform, Spicetify,
+    mutate: (records) => observers[0](records), scans: () => scanCount };
 }
 
-test('Add state mirrors the playing native checkbox, without inferring playlist membership from Like', () => {
-  const button = (uri, checked, nowPlaying = false) => ({
-    ariaLabel: 'Add to Playlists',
-    __reactFiber$test: { memoizedProps: { uri, curateDefault() {} } },
-    getAttribute: () => checked,
-    closest: () => nowPlaying ? {} : null,
-  });
-  const buttons = [button('spotify:track:first', 'false'), button('spotify:track:first', 'true', true)];
-  const h = addHarness(buttons);
-  assert.equal(h.api.state('spotify:track:first'), true);
-  buttons[1] = button('spotify:track:first', 'false', true);
-  assert.equal(h.api.state('spotify:track:first'), false);
-  assert.equal(h.api.state('spotify:track:other'), undefined);
-  buttons.splice(0);
+test('Add state excludes Liked/Loved Songs, fails closed, and follows account and track changes', async () => {
+  const h = addHarness();
+  h.window.JshMusic.love = { playlistUri: async () => 'spotify:playlist:loved' };
+  let rows = [
+    { uri: 'spotify:playlist:37i9dQZF1F5p3rmiWPIYgZ', name: 'Titres likés', hasCuratedItems: true },
+    { uri: 'spotify:playlist:loved', name: 'Loved Songs', hasCuratedItems: true },
+    { uri: 'spotify:playlist:other', name: 'Other', hasCuratedItems: false },
+  ];
+  h.Platform.CurationAPI = {
+    curateItems() {},
+    getCurationContexts: async () => ({ items: structuredClone(rows) }),
+  };
+  const state = async (uri = 'spotify:track:first') => {
+    h.api.state(uri);
+    await new Promise(setImmediate);
+    return h.api.state(uri);
+  };
   assert.equal(h.api.state('spotify:track:first'), undefined);
+  assert.equal(await state(), false);
+  rows[2].hasCuratedItems = true;
+  assert.equal(await state('spotify:track:other'), true);
+  h.Platform.LocalStorageAPI.namespace = 'second-account';
+  rows[2].hasCuratedItems = false;
+  assert.equal(h.api.state('spotify:track:other'), undefined);
+  assert.equal(await state('spotify:track:other'), false);
+  rows[2].hasCuratedItems = undefined;
+  assert.equal(await state('spotify:track:unknown'), undefined);
+  h.Platform.CurationAPI.getCurationContexts = async () => { throw new Error('offline'); };
+  assert.equal(await state('spotify:track:offline'), undefined);
 });
 
-function removalHarness() {
+test('membership follows capped pages and counts ordinary playlists with reserved names', async () => {
   const h = addHarness();
+  h.window.JshMusic.love = { playlistUri: async () => 'spotify:playlist:loved' };
+  const rows = [
+    { uri: 'spotify:playlist:37i9dQZF1F5p3rmiWPIYgZ', name: 'Liked Songs', hasCuratedItems: true },
+    { uri: 'spotify:playlist:loved', name: 'Loved Songs', hasCuratedItems: true },
+    { uri: 'spotify:playlist:other', name: 'Liked Songs', hasCuratedItems: true },
+  ];
+  const offsets = [];
+  h.Platform.CurationAPI = {
+    curateItems() {},
+    getCurationContexts: async ({ offset }) => {
+      offsets.push(offset);
+      return { items: rows.slice(offset, offset + 1), totalLength: rows.length };
+    },
+  };
+  assert.equal(h.api.state('spotify:track:first'), undefined);
+  await new Promise(setImmediate);
+  assert.equal(h.api.state('spotify:track:first'), true);
+  assert.deepEqual(offsets, [0, 1, 2]);
+});
+
+function removalHarness(options = {}) {
+  const h = addHarness([], options);
   const uri = 'spotify:track:first';
   let rows = [
     { uri: 'spotify:track:before', uid: 'before' },
@@ -401,8 +444,27 @@ test('Undo rejects a resolved add at the wrong position and cannot remove an unr
   assert.equal(external.mutations.length, 1);
 });
 
-function selectorHarness(items = []) {
-  const h = addHarness();
+test('idle Remove state caches permissions, and a write still checks fresh permissions', async () => {
+  let now = 100000;
+  const h = removalHarness({ Date: class extends Date { static now() { return now; } } });
+  let reads = 0;
+  h.Platform.PlaylistAPI.getMetadata = async () => {
+    reads += 1;
+    return { canAdd: true, canRemove: true, name: 'First playlist' };
+  };
+  await h.selection();
+  for (let i = 0; i < 20; i++) {
+    now += 60000;
+    assert.equal(h.api.removalState().enabled, true);
+  }
+  assert.equal(reads, 1);
+  h.Platform.PlaylistAPI.getMetadata = async () => ({ canAdd: false, canRemove: false });
+  assert.equal((await h.change('remove')).ok, false);
+  assert.deepEqual(h.mutations, [], 'cached UI permissions never authorize a playlist write');
+});
+
+function selectorHarness(items = [], options = {}) {
+  const h = addHarness([], options);
   const reads = [];
   const writes = [];
   let rows = items;
@@ -431,6 +493,48 @@ function selectorHarness(items = []) {
     async load() { h.api.playlistSelection(); await new Promise(setImmediate); return h.api.playlistSelection(); } };
 }
 const playlistItem = (id, saved = false) => ({ uri: `spotify:playlist:${id}`, name: id, hasCuratedItems: saved });
+
+test('confirmed membership and playlist lists stay cached while idle, and change events refresh without clearing the checkmark', async () => {
+  let now = 100000;
+  let changed;
+  const h = selectorHarness([playlistItem('other', true)], {
+    Date: class extends Date { static now() { return now; } },
+    Platform: { LibraryAPI: { getEvents: () => ({ addListener: (type, callback) => { if (type === 'operation_complete') changed = callback; } }) } },
+  });
+  const uri = 'spotify:track:first';
+  h.api.state(uri);
+  await h.load();
+  assert.equal(h.api.state(uri), true);
+  const reads = h.reads.length;
+  const scans = h.scans();
+  for (let i = 0; i < 20; i++) {
+    now += 60000;
+    assert.equal(h.api.state(uri), true);
+    assert.equal(h.api.playlistSelection().loading, false);
+  }
+  h.mutate([{ type: 'childList', target: {}, addedNodes: [{ nodeType: 3 }], removedNodes: [] }]);
+  assert.equal(h.scans(), scans, 'unrelated DOM changes do not rescan curation buttons');
+  assert.equal(h.reads.length, reads, 'idle companion reads do not reload Spotify playlists');
+
+  h.rows([playlistItem('other', false)]);
+  changed();
+  assert.equal(h.api.state(uri), true, 'confirmed membership survives the pending refresh');
+  await h.load();
+  assert.equal(h.api.state(uri), false);
+  assert.equal(h.api.playlistSelection().playlists[0].saved, false);
+  assert.ok(h.reads.length > reads);
+
+  h.Platform.CurationAPI.getCurationContexts = async () => { throw new Error('offline'); };
+  changed();
+  assert.equal(h.api.state(uri), false);
+  await new Promise(setImmediate);
+  assert.equal(h.api.state(uri), false, 'a failed refresh retains the confirmed checkmark');
+  h.Platform.CurationAPI.getCurationContexts = async () => ({ items: [playlistItem('other', true)] });
+  now += 10001;
+  assert.equal(h.api.state(uri), false);
+  await new Promise(setImmediate);
+  assert.equal(h.api.state(uri), true, 'failed reads can retry and recover');
+});
 
 test('dial membership comes first, keeps native recent-edit order and caches reads', async () => {
   const h = selectorHarness([playlistItem('recent'), playlistItem('inRecent', true), playlistItem('old'), playlistItem('inOld', true)]);

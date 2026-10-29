@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-function harness({ adder = false } = {}) {
+function harness({ adder = false, rootItems, createError, uploadError, pinError } = {}) {
   const liked = new Set();
   const loved = new Set();
   const writes = [];
@@ -12,16 +12,34 @@ function harness({ adder = false } = {}) {
   const nativeButtons = [];
   const scans = [];
   const animations = [];
+  const setupCalls = [];
+  const domWrites = [];
+  const observers = [];
+  let scansRun = 0;
+  const pinned = new Set();
+  const ownedPlaylist = {
+    type: 'playlist', name: 'Loved Songs', uri: 'spotify:playlist:loved', isOwnedBySelf: true,
+  };
+  let items = rootItems || [ownedPlaylist];
   let reduceMotion = false;
   function element() {
     const attributes = new Map();
+    const styles = new Map();
     const node = {
       disabled: false,
-      dataset: {},
-      style: { setProperty() {} },
+      offsetWidth: 16,
+      offsetHeight: 16,
+      dataset: new Proxy({}, { set(target, key, value) {
+        domWrites.push({ key, value }); target[key] = value; return true;
+      } }),
+      style: {
+        getPropertyValue: (key) => styles.get(key)?.value || '',
+        getPropertyPriority: (key) => styles.get(key)?.priority || '',
+        setProperty(key, value, priority = '') { domWrites.push({ key, value }); styles.set(key, { value, priority }); },
+      },
       isConnected: true,
       getAttribute: (key) => attributes.get(key) ?? null,
-      setAttribute: (key, value) => attributes.set(key, value),
+      setAttribute: (key, value) => { domWrites.push({ key, value }); attributes.set(key, value); },
       removeAttribute: (key) => attributes.delete(key),
       closest: () => null,
       classList: { contains: (name) => node.className === name },
@@ -41,6 +59,13 @@ function harness({ adder = false } = {}) {
     return node;
   }
   const library = {
+    async pin(uri, location) {
+      setupCalls.push({ pin: uri, location });
+      if (!pinError) pinned.add(uri);
+    },
+    async getIsPinned(...uris) {
+      return uris.map((uri) => pinned.has(uri));
+    },
     async contains(uri) {
       return [liked.has(uri)];
     },
@@ -57,19 +82,24 @@ function harness({ adder = false } = {}) {
     LibraryAPI: library,
     RootlistAPI: {
       async getContents() {
-        return {
-          items: [
-            {
-              type: 'playlist',
-              name: 'Loved Songs',
-              uri: 'spotify:playlist:loved',
-              isOwnedBySelf: true,
-            },
-          ],
-        };
+        return { items };
+      },
+      async createPlaylist(name, location) {
+        setupCalls.push({ create: name, location });
+        if (createError) throw new Error('Creation failed');
+        items = [...items, ownedPlaylist];
+        return ownedPlaylist.uri;
       },
     },
     PlaylistAPI: {
+      async uploadImage(cover) {
+        setupCalls.push({ upload: cover });
+        if (uploadError) throw new Error('Upload failed');
+        return 'upload-token';
+      },
+      async updateDetails(uri, details) {
+        setupCalls.push({ update: uri, details });
+      },
       async getContents() {
         return { items: [...loved].map((uri) => ({ uri, uid: uri })) };
       },
@@ -91,29 +121,39 @@ function harness({ adder = false } = {}) {
   };
   const window = {
     Spicetify,
+    JshLovedCover: 'data:image/jpeg;base64,cover',
     addEventListener() {},
     matchMedia: () => ({ matches: reduceMotion }),
   };
   const context = {
     window,
     Spicetify,
+    console: { error() {} },
+    fetch: async (url) => {
+      assert.equal(url, window.JshLovedCover);
+      return { ok: true, blob: async () => 'jpeg-blob' };
+    },
     document: {
       addEventListener() {},
       createElement: element,
       head: { append() {} },
       body: {},
-      querySelectorAll: (selector) =>
-        selector === 'button[aria-checked]'
+      querySelectorAll: (selector) => {
+        scansRun += 1;
+        return selector === 'button[aria-checked]'
           ? nativeButtons
-          : controls.filter((node) => selector === `.${node.className}`),
+          : controls.filter((node) => selector === `.${node.className}`);
+      },
     },
     navigator: { platform: 'MacIntel' },
     ResizeObserver: class {
       observe() {}
     },
     MutationObserver: class {
+      constructor(callback) { observers.push(callback); }
       observe() {}
     },
+    getComputedStyle: () => ({ width: '16px', height: '16px' }),
     requestAnimationFrame: (callback) => callback(),
     setTimeout: () => 0,
     clearTimeout() {},
@@ -148,6 +188,10 @@ function harness({ adder = false } = {}) {
     writes,
     notifications,
     animations,
+    setupCalls,
+    domWrites,
+    mutate: (records) => observers.forEach((callback) => callback(records)),
+    scansRun: () => scansRun,
     scan: () => scans.forEach((callback) => callback()),
     reduceMotion: (value = true) => {
       reduceMotion = value;
@@ -165,6 +209,54 @@ function harness({ adder = false } = {}) {
     },
   };
 }
+
+test('configuration creates Loved Songs once during concurrent reads and applies its cover without track writes', async () => {
+  const h = harness({ rootItems: [] });
+  const uris = await Promise.all([h.api.love.playlistUri(), h.api.love.playlistUri()]);
+  await new Promise(setImmediate);
+  assert.deepEqual(uris, ['spotify:playlist:loved', 'spotify:playlist:loved']);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.setupCalls)), [
+    { create: 'Loved Songs', location: { after: 'end' } },
+    { pin: 'spotify:collection:tracks', location: { before: 'start' } },
+    { pin: 'spotify:playlist:loved', location: { after: { uri: 'spotify:collection:tracks' } } },
+    { upload: 'jpeg-blob' },
+    { update: 'spotify:playlist:loved', details: { imageUploadToken: 'upload-token' } },
+  ]);
+  assert.deepEqual(h.writes, []);
+  assert.deepEqual(h.notifications, []);
+});
+
+test('configuration reuses an owned playlist inside a folder and skips another owner’s namesake', async () => {
+  const h = harness({ rootItems: [
+    { type: 'playlist', name: 'Loved Songs', uri: 'spotify:playlist:other', isOwnedBySelf: false },
+    { type: 'folder', items: [
+      { type: 'playlist', name: 'Loved Songs', uri: 'spotify:playlist:nested', ownedBySelf: true },
+    ] },
+  ] });
+  await new Promise(setImmediate);
+  assert.equal(h.setupCalls.some((call) => call.create), false);
+  assert.equal(h.setupCalls.at(-1).update, 'spotify:playlist:nested');
+  assert.deepEqual(h.writes, []);
+});
+
+test('configuration reports creation, pinning and cover failures without changing tracks', async () => {
+  for (const options of [{ rootItems: [], createError: true }, { pinError: true }, { uploadError: true }]) {
+    const h = harness(options);
+    await new Promise(setImmediate);
+    assert.equal(h.setupCalls.some((call) => call.update), false);
+    assert.deepEqual(h.writes, []);
+    assert.equal(h.notifications.at(-1).error, true);
+  }
+});
+
+test('the bundled cover is a JPEG and fits Spotify’s upload limit', () => {
+  const window = {};
+  vm.runInNewContext(readFileSync(new URL('../../src/spicetify/loved-cover.js', import.meta.url), 'utf8'), { window });
+  assert.ok(window.JshLovedCover.startsWith('data:image/jpeg;base64,'));
+  const payload = window.JshLovedCover.split(',')[1];
+  assert.ok(payload.length < 256 * 1024);
+  assert.equal(Buffer.from(payload, 'base64').subarray(0, 3).toString('hex'), 'ffd8ff');
+});
 
 test('curation buttons switch immediately, keep the new fill through confirmation, and show no success toast or delayed pop', async () => {
   const h = harness();
@@ -211,6 +303,24 @@ test('curation buttons switch immediately, keep the new fill through confirmatio
   await Promise.resolve();
   assert.equal(star.getAttribute('aria-pressed'), 'true');
   assert.equal(heart.getAttribute('aria-pressed'), 'false');
+});
+
+test('unchanged curation buttons perform no DOM writes, and unrelated mutations do not rescan them', async () => {
+  const h = harness();
+  const { native, star, heart } = h.mount('spotify:track:first');
+  await new Promise(setImmediate);
+  h.domWrites.length = 0;
+  for (let i = 0; i < 10; i++) h.scan();
+  assert.deepEqual(h.domWrites, [], 'repeat renders leave attributes and sizing untouched');
+  const scans = h.scansRun();
+  h.mutate([{ target: {}, addedNodes: [{ nodeType: 3 }], removedNodes: [] }]);
+  assert.equal(h.scansRun(), scans);
+  assert.deepEqual(h.domWrites, []);
+  native.offsetWidth = 24;
+  h.scan();
+  assert.equal(star.style.getPropertyValue('--jsh-button-width'), '24px');
+  assert.equal(heart.style.getPropertyValue('--jsh-button-width'), '24px');
+  assert.ok(h.domWrites.length, 'real layout changes still resize the existing buttons');
 });
 
 test('unknown refreshes retain fill; pending toggles are immediate and failed writes restore the confirmed state', async () => {
