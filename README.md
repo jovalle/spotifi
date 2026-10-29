@@ -64,6 +64,12 @@ Dedicated page of controls.
 
 ![Stream Deck](assets/stream-deck.jpeg)
 
+# Episodes Begone
+
+I don't care about podcasts, Spotify. I **just** want music. The fact that Your Episodes is immutable is infuriating. We address that by hiding the item altogether.
+
+![Sidebar](assets/sidebar.png)
+
 ## Quick start
 
 On macOS, install [Homebrew](https://brew.sh/) and run:
@@ -79,19 +85,19 @@ just configure
 
 ## Commands
 
-| Task | Purpose |
-| --- | --- |
-| `just configure` | Reconcile the complete supported setup |
-| `just dependencies` | Install missing Spotify and Spicetify dependencies |
-| `just spotify` | Reconcile managed Spotify extensions |
-| `just mini` | Reconcile the native companion and login startup |
-| `just streamdeck` | Reconcile an installed Stream Deck app's plugin and controls page |
-| `just plan` | Preview Stream Deck changes without writing them |
-| `just test` | Run JavaScript and Python tests |
-| `just test-mini` | Build and check the native companion and HTTP bridge |
-| `just lint` | Check Python lint and formatting |
-| `just check` | Run lint, formatting, and regression tests |
-| `just build` | Build a source archive and an installable wheel |
+| Task                | Purpose                                                           |
+| ------------------- | ----------------------------------------------------------------- |
+| `just configure`    | Reconcile the complete supported setup                            |
+| `just dependencies` | Install missing Spotify and Spicetify dependencies                |
+| `just spotify`      | Reconcile managed Spotify extensions                              |
+| `just mini`         | Reconcile the native companion and login startup                  |
+| `just streamdeck`   | Reconcile an installed Stream Deck app's plugin and controls page |
+| `just plan`         | Preview Stream Deck changes without writing them                  |
+| `just test`         | Run JavaScript and Python tests                                   |
+| `just test-mini`    | Build and check the native companion and HTTP bridge              |
+| `just lint`         | Check Python lint and formatting                                  |
+| `just check`        | Run lint, formatting, and regression tests                        |
+| `just build`        | Build a source archive and an installable wheel                   |
 
 The CLI is available at `bin/spotifi`:
 

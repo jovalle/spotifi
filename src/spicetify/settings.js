@@ -23,6 +23,34 @@
     }),
   ).catch((error) => console.error('[settings] Failed to apply Spotify settings', error));
 
+  const libraryStyle = document.createElement('style');
+  libraryStyle.textContent =
+    '.jsh-your-episodes { display: none !important; }';
+  document.head.append(libraryStyle);
+
+  // shortcut: reads Spotify's React libraryItem props; update if the library structure changes.
+  function hideEpisodes() {
+    for (const row of document.querySelectorAll('[role="row"]')) {
+      const key = Object.getOwnPropertyNames(row).find((key) => key.startsWith('__reactFiber$'));
+      let isEpisodes = false;
+      for (let fiber = row[key], level = 0; fiber && level < 40; fiber = fiber.return, level += 1) {
+        const item = fiber.memoizedProps?.libraryItem;
+        if (!item) continue;
+        isEpisodes = item.type === 'your-episodes';
+        break;
+      }
+      row.classList.toggle('jsh-your-episodes', isEpisodes);
+    }
+  }
+  hideEpisodes();
+  new MutationObserver((records) => {
+    if (records.some(({ target, addedNodes, removedNodes }) =>
+      target.closest?.('[role="row"]') ||
+      [...addedNodes, ...removedNodes].some((node) => node.nodeType === 1 &&
+        (node.matches('[role="row"]') || node.querySelector('[role="row"]')))))
+      hideEpisodes();
+  }).observe(document.body, { childList: true, subtree: true });
+
   // Spicetify maps Spotify's macOS (52px) and Windows/Linux (28px) spacers to one class; 28px wins.
   if (/mac/i.test(navigator.userAgentData?.platform || navigator.platform)) {
     const spacerStyle = document.createElement('style');
