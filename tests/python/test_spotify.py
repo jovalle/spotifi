@@ -98,7 +98,7 @@ class IsolatedSpotify(unittest.TestCase):
         )
         for name in spotify_api.EXTENSIONS:
             (xpui / "extensions" / name).write_bytes(
-                (spotify_api.EXTENSION_DIR / name).read_bytes()
+                (spotify_api.EXTENSION_SOURCES[name]).read_bytes()
             )
 
     def spicetify(self, *args, check=True):
@@ -138,7 +138,7 @@ class IsolatedSpotify(unittest.TestCase):
         for name in spotify_api.EXTENSIONS:
             system_api.private_write(
                 self.config.parent / "Extensions" / name,
-                (spotify_api.EXTENSION_DIR / name).read_bytes(),
+                (spotify_api.EXTENSION_SOURCES[name]).read_bytes(),
             )
         self.install_bundle()
 
@@ -430,7 +430,7 @@ class SpotifyTests(IsolatedSpotify):
             self.assertIn(("config", "extensions", name), self.calls)
             self.assertTrue(spotify_api.has_extension(self.config, name))
             target = self.config.parent / "Extensions" / name
-            self.assertTrue(system_api.same_file(spotify_api.EXTENSION_DIR / name, target))
+            self.assertTrue(system_api.same_file(spotify_api.EXTENSION_SOURCES[name], target))
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
 
     def test_missing_backup_uses_backup_apply(self):

@@ -11,6 +11,9 @@
       .jsh-queue-button { position: relative; overflow: visible; }
       .jsh-queue-count { position: absolute; top: -2px; right: -5px; min-width: 18px; height: 18px; padding: 0 4px; box-sizing: border-box; border-radius: 999px; background: #1db954; color: #000; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; pointer-events: none; }
       .jsh-queue-count:empty { display: none; }
+      .player-controls__left > .jsh-seek-back, .player-controls__right > .jsh-seek-forward { order: 1; }
+      .player-controls__left > :is([data-testid="control-button-skip-back"], :has([data-testid="control-button-skip-back"])),
+      .player-controls__right > :is([data-testid="control-button-repeat"], :has([data-testid="control-button-repeat"])) { order: 2; }
     `;
     document.head.append(style);
   }
@@ -48,25 +51,40 @@
   }
 
   function openQueue(toggle = false) {
-    const button = document.querySelector('.main-nowPlayingBar-nowPlayingBar [data-testid="control-button-queue"]');
+    const button = document.querySelector('[data-testid="now-playing-bar"] [data-testid="control-button-queue"]') ||
+      document.querySelector('.main-nowPlayingBar-nowPlayingBar [data-testid="control-button-queue"]');
     if (!button || button.disabled) throw new Error('Queue unavailable');
     if (toggle || button.getAttribute('aria-pressed') !== 'true') button.click();
   }
 
   function decoratePlayer() {
-    const bar = document.querySelector('.main-nowPlayingBar-nowPlayingBar');
+    const bar = document.querySelector('[data-testid="now-playing-bar"]') || document.querySelector('.main-nowPlayingBar-nowPlayingBar');
     if (!bar) return;
     for (const [direction, method] of [['back', 'skipBack'], ['forward', 'skipForward']]) {
       const native = bar.querySelector(`[data-testid="control-button-skip-${direction}"]`);
-      if (!native || bar.querySelector(`.jsh-seek-${direction}`)) continue;
-      const button = document.createElement('button');
-      button.className = `${native.className} jsh-seek-${direction}`;
-      button.type = 'button';
-      button.title = button.ariaLabel = `${direction === 'back' ? 'Rewind' : 'Fast-forward'} 10 seconds`;
-      button.innerHTML = `<svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><g transform="${direction === 'forward' ? 'translate(24 0) scale(-1 1)' : ''}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11a9 9 0 1 0 9-9c-2.5 0-4.8 1-6.5 2.5L3 7"></path><path d="M3 2v5h5"></path></g><text x="12" y="15" text-anchor="middle" fill="currentColor" font-family="system-ui, sans-serif" font-size="8" font-weight="600">10</text></svg>`;
-      button.onclick = () => Spicetify.Player[method](10000);
-      if (direction === 'back') native.before(button);
-      else native.after(button);
+      if (!native) continue;
+      let button = bar.querySelector(`.jsh-seek-${direction}`);
+      if (!button) {
+        button = document.createElement('button');
+        button.className = `${native.className} jsh-seek-${direction}`;
+        button.type = 'button';
+        button.title = button.ariaLabel = `${direction === 'back' ? 'Rewind' : 'Fast-forward'} 10 seconds`;
+        button.innerHTML = `<svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><g transform="${direction === 'forward' ? 'translate(24 0) scale(-1 1)' : ''}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11a9 9 0 1 0 9-9c-2.5 0-4.8 1-6.5 2.5L3 7"></path><path d="M3 2v5h5"></path></g><text x="12" y="15" text-anchor="middle" fill="currentColor" font-family="system-ui, sans-serif" font-size="8" font-weight="600">10</text></svg>`;
+        button.onclick = () => Spicetify.Player[method](10000);
+      }
+      // Spotify wraps individual controls; insert beside the wrapper in the
+      // flex group so a tooltip wrapper cannot change the visual order.
+      let group = native.closest(direction === 'back' ? '.player-controls__left' : '.player-controls__right');
+      const controls = native.closest('[data-testid="general-controls"]');
+      if (!group && controls) {
+        group = native;
+        while (group.parentElement && group.parentElement !== controls) group = group.parentElement;
+      }
+      let anchor = native;
+      if (group) while (anchor.parentElement !== group) anchor = anchor.parentElement;
+      if (direction === 'back') {
+        if (anchor.previousElementSibling !== button) anchor.before(button);
+      } else if (anchor.nextElementSibling !== button) anchor.after(button);
     }
     for (const button of bar.querySelectorAll('.jsh-seek-back, .jsh-seek-forward')) {
       const disabled = Spicetify.Player.data?.restrictions?.canSeek === false;
@@ -113,7 +131,7 @@
   window.JshMusic.play = { queueCount, openQueue, randomize: (validate) => playSelection('randomize', 'current', validate) };
   Spicetify.Player.addEventListener?.('songchange', decoratePlayer);
   Spicetify.Platform.PlayerAPI?.getEvents?.()?.addListener?.('queue_update', decoratePlayer);
-  const playerControls = '.main-nowPlayingBar-nowPlayingBar, .main-nowPlayingWidget-trackInfo, [data-testid="control-button-queue"], [data-testid="control-button-skip-back"], [data-testid="control-button-skip-forward"]';
+  const playerControls = '[data-testid="now-playing-bar"], .main-nowPlayingBar-nowPlayingBar, .main-nowPlayingWidget-trackInfo, [data-testid="control-button-queue"], [data-testid="control-button-shuffle"], [data-testid="control-button-skip-back"], [data-testid="control-button-skip-forward"]';
   new MutationObserver((records) => {
     if (records.some(({ target, addedNodes, removedNodes }) =>
       target.closest?.('.main-nowPlayingWidget-trackInfo') ||
@@ -298,7 +316,7 @@
     // Match Spotify's Go to Now Playing shortcut, including the page and row position.
     const trackContext = context.uri.startsWith('spotify:track:');
     let contextUri = context.uri;
-    if (trackContext || item.provider === 'queue') contextUri = item.album?.uri || item.uri;
+    if (trackContext || (item.provider === 'queue' && !context.uri.startsWith('spotify:playlist:'))) contextUri = item.album?.uri || item.uri;
     if (contextUri === 'spotify:internal:local-files' || contextUri === 'spotify:local-files') {
       contextUri = 'spotify:collection:local-files';
     }
@@ -312,13 +330,181 @@
     if (!pathname) return null;
 
     const params = new URLSearchParams();
-    if (item.uid != null) params.set('uid', item.uid);
+    // Spotify resolves playlist uid links by loading the entire list. Scroll by
+    // a verified index instead so opening a large playlist remains responsive.
+    if (item.uid != null && !contextUri.startsWith('spotify:playlist:')) params.set('uid', item.uid);
     params.set('uri', item.uri);
     if (index?.pageIndex != null) params.set('page', index.pageIndex);
     if (index?.pageURI != null) params.set('pageUri', index.pageURI);
     if (index?.itemIndex != null) params.set('index', index.itemIndex);
     if (trackContext) params.set('highlight', item.uri);
     return { pathname, search: `?${params}` };
+  }
+
+  function scrollOpenPlaylist(index) {
+    const list = document.querySelector('.main-view-container .main-trackList-trackList') ||
+      document.querySelector('.main-trackList-trackList');
+    const key = list && Object.getOwnPropertyNames(list).find((name) => name.startsWith('__reactFiber$'));
+    for (let fiber = key && list[key], depth = 0; fiber && depth < 40; fiber = fiber.return, depth++) {
+      const direct = fiber.ref?.current;
+      if (typeof direct?.scrollToIndex === 'function') { direct.scrollToIndex(index); return true; }
+      for (let hook = fiber.memoizedState, count = 0; hook && count < 100; hook = hook.next, count++) {
+        const handle = hook.memoizedState?.current;
+        if (typeof handle?.scrollToIndex === 'function') { handle.scrollToIndex(index); return true; }
+      }
+    }
+    const scroller = list?.closest?.('[data-overlayscrollbars-viewport], .main-view-container__scroll-node');
+    if (list && scroller && typeof getComputedStyle === 'function') {
+      const rowHeight = parseFloat(getComputedStyle(list).getPropertyValue('--row-height'));
+      if (Number.isFinite(rowHeight) && rowHeight > 0) {
+        const header = list.querySelector?.('.main-trackList-trackListHeader');
+        const top = list.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+        scroller.scrollTop = Math.max(0, top + (header?.offsetHeight || 0) + index * rowHeight - scroller.clientHeight / 2);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function visiblePlayingRow(uri) {
+    const list = document.querySelector('.main-view-container .main-trackList-trackList') ||
+      document.querySelector('.main-trackList-trackList');
+    const trackId = uri.startsWith('spotify:track:') ? uri.slice('spotify:track:'.length) : '';
+    for (const row of list?.querySelectorAll?.('.main-trackList-trackListRow') || []) {
+      const key = Object.getOwnPropertyNames(row).find((name) => name.startsWith('__reactFiber$'));
+      for (let fiber = key && row[key], depth = 0; fiber && depth < 16; fiber = fiber.return, depth++) {
+        const props = fiber.memoizedProps;
+        if (props?.uri === uri || props?.item?.uri === uri) return row;
+      }
+      if (trackId && [...(row.querySelectorAll?.('a[href]') || [])].some((link) => {
+        const href = link.getAttribute('href') || '';
+        return href.split(/[?#]/)[0].replace(/\/$/, '').endsWith(`/track/${trackId}`);
+      })) return row;
+    }
+    return null;
+  }
+
+  let jumpSequence = 0;
+  // The playlist sort provider stores its per-playlist state under sortedState.
+  // Keep the lightweight request in the same order as the rendered track list.
+  function playlistSort(context) {
+    let states = Spicetify.Platform.LocalStorageAPI?.getItem?.('sortedState');
+    if (typeof states === 'string') { try { states = JSON.parse(states); } catch { return null; } }
+    let sort = states?.[context];
+    const list = document.querySelector('.main-view-container .main-trackList-trackList') ||
+      document.querySelector('.main-trackList-trackList');
+    const key = list && Object.getOwnPropertyNames(list).find((name) => name.startsWith('__reactFiber$'));
+    for (let fiber = key && list[key], depth = 0; fiber && depth < 80; fiber = fiber.return, depth++) {
+      const value = fiber.memoizedProps?.value;
+      if (value && typeof value.setSortState === 'function' && 'sortState' in value) {
+        sort = value.sortState;
+        break;
+      }
+    }
+    if (!sort) return null;
+    if (sort.column) {
+      const fields = { TITLE: 'TITLE', TITLE_COMPACT: 'TITLE', TITLE_AND_ARTIST: 'TITLE',
+        ARTIST: 'ARTIST', ALBUM: 'ALBUM', ALBUM_OR_PODCAST: 'ALBUM', ADDED_AT: 'ADDED_AT',
+        ADDED_BY: 'ADDED_BY', DURATION: 'DURATION', RELEASE_DATE: 'PUBLISH_DATE', TITLE_AND_AUTHOR: 'TITLE' };
+      const field = sort.column === 'TITLE_AND_ARTIST' && [3, 4].includes(sort.order) ? 'ARTIST' : fields[sort.column];
+      sort = { field, order: [1, 3].includes(sort.order) ? 'ASC' : [2, 4].includes(sort.order) ? 'DESC' : null };
+    }
+    const keys = { ALBUM: 7, ARTIST: 9, TITLE: 11, ADDED_AT: 13, ADDED_BY: 15,
+      DURATION: 17, SHOW_NAME: 19, PUBLISH_DATE: 21 };
+    if (!keys[sort.field] || !['ASC', 'DESC'].includes(sort.order)) throw new Error('Unknown playlist sort');
+    return { field: sort.field, order: sort.order, sortBy: keys[sort.field] + (sort.order === 'DESC' ? 1 : 0) };
+  }
+
+  async function jumpToPlaylist(location, selection) {
+    const sequence = ++jumpSequence;
+    let position = selection.index?.itemIndex;
+    const api = Spicetify.Platform.PlaylistAPI;
+    if (!api?.getContents) {
+      Spicetify.showNotification?.('Could not locate this track in the playing playlist', true);
+      return;
+    }
+    try {
+      const sort = playlistSort(selection.context);
+      const sameSort = () => JSON.stringify(playlistSort(selection.context)) === JSON.stringify(sort);
+      let restarting = false;
+      const current = () => {
+        if (sequence !== jumpSequence || Spicetify.Player.data?.context?.uri !== selection.context ||
+            Spicetify.Player.data?.item?.uri !== selection.uri) return false;
+        if (sameSort()) return true;
+        if (!restarting) {
+          restarting = true;
+          setTimeout(() => { if (sequence === jumpSequence) void jumpToPlaylist(location, selection); }, 0);
+        }
+        return false;
+      };
+      if (!sort && Number.isInteger(position) && position >= 0) {
+        const page = await api.getContents(selection.context, { offset: position, limit: 1 });
+        if (!current()) return;
+        if (page?.items?.[0]?.uri !== selection.uri) position = -1;
+      } else position = -1;
+      if (position < 0) {
+        // Spotify's own playlist service supports a lightweight policy: fetch
+        // only URIs and row IDs, without decorating thousands of tracks.
+        const raw = api._playlistDataClient;
+        if (typeof raw?.get === 'function') {
+          try {
+            const result = await raw.get({ uri: selection.context, query: { includeAllPlaceholders: true, ...(sort ? { sortBy: sort.sortBy } : {}) },
+              policy: { item: { uri: true }, track: { rowId: true } } });
+            if (!current()) return;
+            if (Array.isArray(result?.data?.item)) {
+              const items = result.data.item;
+              const exact = selection.uid ? items.findIndex((row) => row?.rowId === selection.uid && row?.uri === selection.uri) : -1;
+              position = exact >= 0 ? exact : items.findIndex((row) => row?.uri === selection.uri);
+              if (position >= 0) {
+                // The lightweight response can omit rows and compact their indices.
+                const page = await api.getContents(selection.context, { offset: position, limit: 1,
+                  ...(sort ? { sort: { field: sort.field, order: sort.order } } : {}) });
+                if (!current()) return;
+                const row = page?.items?.[0];
+                if (row?.uri !== selection.uri || (selection.uid && row.uid !== selection.uid)) position = -1;
+              }
+            }
+          } catch { position = -1; }
+        }
+        let offset = 0;
+        while (position < 0 && offset < 50000 && current()) {
+          const page = await api.getContents(selection.context, { offset, limit: 100,
+            ...(sort ? { sort: { field: sort.field, order: sort.order } } : {}) });
+          if (!current()) return;
+          if (!Array.isArray(page?.items) || page.items.length === 0) break;
+          const found = page.items.findIndex((row) => row?.uri === selection.uri && (!selection.uid || row.uid === selection.uid));
+          if (found >= 0) { position = offset + found; break; }
+          offset += page.items.length;
+          if ((Number.isInteger(page.totalLength) && offset >= page.totalLength) ||
+              (!Number.isInteger(page.totalLength) && page.items.length < 100)) break;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (!current()) return;
+        if (position < 0) throw new Error('Track not found');
+      }
+      const attempt = (remaining) => {
+        if (!current()) return;
+        const path = Spicetify.Platform.History.location?.pathname;
+        if (path === location.pathname && scrollOpenPlaylist(position)) {
+          // A virtualized list renders asynchronously. Do not treat assigning
+          // scrollTop as success until Spotify actually renders the target row.
+          const verify = (retries) => {
+            if (!current() || Spicetify.Platform.History.location?.pathname !== location.pathname) return;
+            const row = visiblePlayingRow(selection.uri);
+            if (row) { row.scrollIntoView({ block: 'center', inline: 'nearest' }); return; }
+            if (retries > 0) setTimeout(() => verify(retries - 1), 100);
+            else Spicetify.showNotification?.('The playlist opened, but Spotify did not reveal the playing track', true);
+          };
+          verify(20);
+          return;
+        }
+        if (remaining > 0) setTimeout(() => attempt(remaining - 1), 100);
+        else Spicetify.showNotification?.('Could not scroll to this track in the playing playlist', true);
+      };
+      attempt(50);
+    } catch {
+      if (sequence === jumpSequence) Spicetify.showNotification?.('Could not locate this track in the playing playlist', true);
+    }
   }
 
   window.addEventListener(
@@ -340,7 +526,13 @@
       if (!location) return;
       event.preventDefault();
       event.stopPropagation();
+      const data = Spicetify.Player.data;
+      const context = data?.context?.uri;
+      const item = data?.item;
       Spicetify.Platform.History.push(location);
+      if (context?.startsWith('spotify:playlist:')) {
+        void jumpToPlaylist(location, { context, uri: item.uri, uid: item.uid, index: data.index });
+      } else jumpSequence++;
     },
     true,
   );

@@ -12,7 +12,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[2]
 wheel = Path(sys.argv[1]).resolve()
 with zipfile.ZipFile(wheel) as archive:
-    for directory in ("src/spicetify", "src/streamdeck", "conf"):
+    for directory in ("modules", "src/streamdeck", "conf"):
         for source in (root / directory).rglob("*"):
             if source.is_file() and "logs" not in source.parts:
                 relative = source.relative_to(root).as_posix()
@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix="spotifi-wheel-") as temporary:
 from spotifi import resources, spotify, streamdeck
 import json
 assert resources.ROOT.name == "resources"
-assert all((spotify.EXTENSION_DIR / name).is_file() for name in spotify.EXTENSIONS)
+assert all(spotify.EXTENSION_SOURCES[name].is_file() for name in spotify.EXTENSIONS)
 assert (resources.ROOT / "src/mini-player.swift").is_file()
 source = resources.ROOT / "conf/streamdeck/com.jovalle.spotifi.sdPlugin"
 manifest = json.loads((source / "manifest.json").read_text())

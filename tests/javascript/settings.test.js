@@ -5,7 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(
-  path.join(__dirname, '..', '..', 'src', 'spicetify', 'settings.js'),
+  path.join(__dirname, '..', '..', 'modules', 'settings', 'settings.js'),
   'utf8',
 );
 

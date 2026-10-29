@@ -174,7 +174,7 @@ function harness({ adder = false, rootItems, createError, uploadError, pinError 
   }
   for (const name of ['like', 'love', ...(adder ? ['add'] : [])]) {
     vm.runInNewContext(
-      readFileSync(new URL(`../../src/spicetify/${name}.js`, import.meta.url), 'utf8'),
+      readFileSync(new URL(`../../modules/${name === 'add' ? 'library' : 'library-controls'}/${name}.js`, import.meta.url), 'utf8'),
       context,
     );
   }
@@ -251,7 +251,7 @@ test('configuration reports creation, pinning and cover failures without changin
 
 test('the bundled cover is a JPEG and fits Spotify’s upload limit', () => {
   const window = {};
-  vm.runInNewContext(readFileSync(new URL('../../src/spicetify/loved-cover.js', import.meta.url), 'utf8'), { window });
+  vm.runInNewContext(readFileSync(new URL('../../modules/library-controls/loved-cover.js', import.meta.url), 'utf8'), { window });
   assert.ok(window.JshLovedCover.startsWith('data:image/jpeg;base64,'));
   const payload = window.JshLovedCover.split(',')[1];
   assert.ok(payload.length < 256 * 1024);

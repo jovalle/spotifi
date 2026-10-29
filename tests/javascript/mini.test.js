@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const test = require('node:test');
-const source = fs.readFileSync(`${__dirname}/../../src/spicetify/mini.js`, 'utf8');
+const source = fs.readFileSync(`${__dirname}/../../modules/mini/mini.js`, 'utf8');
 
 function harness({ stream, player = {}, clock = Date } = {}) {
   const calls = [];

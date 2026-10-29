@@ -36,7 +36,9 @@ Love a song? Adds to your Loved Songs playlist.
 
 Like a song? Stars and adds to your Liked Songs playlist.
 
-Song already in a playlist other than Liked Songs or Loved Songs? Green checkmark; otherwise, plus. Click to see/choose where.
+The adjacent Spotify control keeps its native add and playlist-menu behavior.
+
+The X below the playing track's add button marks it for removal from the playing playlist when the track changes. Click again to cancel. In supported personalized playlists, it hides the track in that playlist instead; the control is hidden where neither action is available.
 
 ![Love/Like/Add](assets/traffic-light-controls.png)
 

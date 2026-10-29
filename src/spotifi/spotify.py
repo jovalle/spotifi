@@ -16,19 +16,12 @@ from .config import load_mini_config, mini_config
 from .resources import PROJECT_ROOT, ROOT
 from .system import atomic_write, current_platform, private_write, run, same_file
 
-EXTENSIONS = (
-    "settings.js",
-    "add.js",
-    "play.js",
-    "like.js",
-    "loved-cover.js",
-    "love.js",
-    "lyrics.js",
-    "mini.js",
-    "keys.js",
-)
-
-EXTENSION_DIR = ROOT / "src/spicetify"
+MODULE_DIR = ROOT / "modules"
+MODULES = json.loads((MODULE_DIR / "manifest.json").read_text())
+EXTENSION_SOURCES = {
+    name: MODULE_DIR / module / name for module, names in MODULES.items() for name in names
+}
+EXTENSIONS = tuple(EXTENSION_SOURCES)
 
 RETIRED = ("harmonic.js", "spotifai-quick-save.js")
 
@@ -365,7 +358,7 @@ def repair_applied_bundle(binary):
         tags.append(f"<script{' defer' if defer else ''} src='helper/{name}.js'></script>")
     for extension in EXTENSIONS:
         target = index.parent / "extensions" / extension
-        atomic_write(target, (EXTENSION_DIR / extension).read_bytes())
+        atomic_write(target, (EXTENSION_SOURCES[extension]).read_bytes())
         target.chmod(0o644)
     for extension in RETIRED:
         (index.parent / "extensions" / extension).unlink(missing_ok=True)
@@ -423,7 +416,7 @@ def is_applied(spotify):
         )
         and all(
             "extensions/" + name in text
-            and same_file(EXTENSION_DIR / name, xpui / "extensions" / name)
+            and same_file(EXTENSION_SOURCES[name], xpui / "extensions" / name)
             for name in EXTENSIONS
         )
     )
@@ -463,7 +456,7 @@ def configuration_is_current(binary, spotify, prefs):
         paths_match(config, spotify, prefs)
         and all(
             has_extension(config, name)
-            and same_file(EXTENSION_DIR / name, config.parent / "Extensions" / name)
+            and same_file(EXTENSION_SOURCES[name], config.parent / "Extensions" / name)
             for name in EXTENSIONS
         )
         and not any(
@@ -478,7 +471,7 @@ def configuration_is_current(binary, spotify, prefs):
 
 def configure_spicetify(binary, spotify, prefs, force=False):
     location = run(binary, "-c").stdout.strip()
-    if not location or not Path(location).is_file():
+    if not location:
         raise RuntimeError("Failed to locate the Spicetify configuration.")
     config = Path(location)
     changed = False
@@ -489,8 +482,8 @@ def configure_spicetify(binary, spotify, prefs, force=False):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
     for name in EXTENSIONS:
-        if not same_file(EXTENSION_DIR / name, directory / name):
-            private_write(directory / name, (EXTENSION_DIR / name).read_bytes())
+        if not same_file(EXTENSION_SOURCES[name], directory / name):
+            private_write(directory / name, (EXTENSION_SOURCES[name]).read_bytes())
             changed = True
         if not has_extension(config, name):
             run(binary, "config", "extensions", name)
@@ -524,7 +517,7 @@ def configure_spicetify(binary, spotify, prefs, force=False):
         target = spotify / "Apps/xpui/extensions" / name
         if not target.is_file():
             raise RuntimeError(f"Extension {name} is missing from the Spotify bundle.")
-        if not same_file(EXTENSION_DIR / name, target):
+        if not same_file(EXTENSION_SOURCES[name], target):
             raise RuntimeError(f"Extension {name} in the Spotify bundle does not match the source.")
     if not is_applied(spotify):
         raise RuntimeError(

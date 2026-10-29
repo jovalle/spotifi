@@ -6,9 +6,7 @@
 
   const OVERLAY_ID = 'adder';
   const RESULT_LIMIT = 100;
-  const ADD_LABEL = 'Add to Playlists';
   let activeOverlay = null;
-  let hoveredAddButton = null;
   let addScanQueued = false;
 
   function account() {
@@ -22,6 +20,115 @@
   let removalBusy = false;
   let capabilities = null;
   let removalSequence = 0;
+  let deferred = null;
+  let deferredEntry = null;
+  const deferredListeners = new Set();
+  const hideFormats = new Set(['artistsets', 'artist-mix-reader', 'blend', 'daily-mix', 'daylist',
+    'discover-weekly', 'descripto', 'inspiredby-mix', 'on-repeat', 'release-radar',
+    'repeat-rewind', 'topic-mix']);
+
+  function notifyDeferred() {
+    for (const listener of deferredListeners) listener();
+  }
+
+  function feedbackAPI() {
+    try {
+      return Spicetify.Platform?.FeedbackAPI || Spicetify.Platform?.Registry?.resolve?.(Symbol.for('FeedbackAPI'));
+    } catch {
+      return null;
+    }
+  }
+
+  function deferredState() {
+    const selection = playingSelection();
+    const metadata = capabilities?.key === `${selection.account}:${selection.context}` ? capabilities.value : null;
+    // Start the shared asynchronous metadata lookup.
+    removalState();
+    const feedback = feedbackAPI();
+    const format = Spicetify.Player.data?.context?.metadata?.format_list_type || metadata?.format_list_type || metadata?.metadata?.format_list_type || metadata?.formatListData?.type;
+    const validContext = validPlaylistContext(selection);
+    const contextEntry = validPlaylistContext(selection);
+    const queueEntry = validQueueContext(selection);
+    const entryKey = JSON.stringify(selection);
+    if (((contextEntry && !selection.itemUid) || queueEntry) && (!deferredEntry || deferredEntry.key !== entryKey)) {
+      const request = { key: entryKey, uid: '', loading: true };
+      deferredEntry = request;
+      playlistRows(selection.context).then((rows) => {
+        const matches = rows.filter((row) => row.uri === selection.uri);
+        if (queueEntry && selection.itemUid && matches.some((row) => row.uid === selection.itemUid))
+          request.uid = selection.itemUid;
+        else if (matches.length === 1 && matches[0].uid) request.uid = matches[0].uid;
+      }).catch(() => {
+        setTimeout(() => {
+          if (deferredEntry === request) { deferredEntry = null; notifyDeferred(); }
+        }, 10000);
+      }).finally(() => {
+        request.loading = false;
+        if (deferredEntry === request) notifyDeferred();
+      });
+    }
+    const resolvedUid = queueEntry ? (deferredEntry?.key === entryKey ? deferredEntry.uid : '') :
+      selection.itemUid || (deferredEntry?.key === entryKey ? deferredEntry.uid : '');
+    const valid = validSelection(selection) || ((contextEntry || queueEntry) && resolvedUid);
+    let mode = null;
+    if (valid && metadata?.canRemove === true && Spicetify.Platform?.PlaylistAPI?.remove && Spicetify.Platform?.PlaylistAPI?.getContents) mode = 'remove';
+    else if (validContext && metadata?.canRemove === false &&
+      hideFormats.has(format) && feedback?.getCapabilities?.()?.canBan === true &&
+      typeof feedback.addContextTrackBan === 'function') mode = 'hide';
+    return { ...selection, mode, resolvedUid, selected: Boolean(deferred && sameDeferredSelection(deferred.selection, selection)) };
+  }
+
+  function sameDeferredSelection(a, b) {
+    return a.account === b.account && a.context === b.context && a.uri === b.uri &&
+      a.provider === b.provider && (!a.itemUid || !b.itemUid || a.itemUid === b.itemUid);
+  }
+
+  function toggleDeferred() {
+    const state = deferredState();
+    if (!state.mode) return;
+    deferred = state.selected ? null : { selection: playingSelection(), mode: state.mode, targetUid: state.resolvedUid };
+    notifyDeferred();
+  }
+
+  async function executeDeferred(job) {
+    const { selection, mode, targetUid } = job;
+    try {
+      if (account() !== selection.account) throw new Error('Spotify account changed');
+      const api = Spicetify.Platform.PlaylistAPI;
+      const metadata = await api.getMetadata(selection.context);
+      if (account() !== selection.account) throw new Error('Spotify account changed');
+      if (mode === 'remove') {
+        if (metadata?.canRemove !== true) throw new Error('Playlist permission changed');
+        const rows = await playlistRows(selection.context);
+        if (account() !== selection.account) throw new Error('Spotify account changed');
+        const target = { uri: selection.uri, uid: targetUid };
+        if (!rows.some((row) => sameRow(row, target))) throw new Error('Playlist entry no longer exists');
+        await api.remove(selection.context, [target]);
+        if ((await playlistRows(selection.context)).some((row) => sameRow(row, target)))
+          throw new Error('Spotify did not remove the playlist entry');
+      } else {
+        const feedback = feedbackAPI();
+        if (metadata?.canRemove !== false || feedback?.getCapabilities?.()?.canBan !== true ||
+            typeof feedback.addContextTrackBan !== 'function') throw new Error('Hide is unavailable');
+        await feedback.addContextTrackBan(selection.context, selection.uri, selection.provider);
+      }
+      Spicetify.showNotification?.(`${mode === 'hide' ? 'Hidden in' : 'Removed from'} ${metadata.name || 'playing playlist'}`);
+    } catch (error) {
+      Spicetify.showNotification?.(`Could not ${mode} track: ${error.message || 'Check Spotify'}`, true);
+    }
+  }
+
+  function deferredSongChange() {
+    if (deferred) {
+      const current = playingSelection();
+      if (current.account && current.context && current.uri && !sameDeferredSelection(current, deferred.selection)) {
+        const job = deferred;
+        deferred = null;
+        if (current.account === job.selection.account) void executeDeferred(job);
+      }
+    }
+    notifyDeferred();
+  }
 
   function playingSelection() {
     const data = Spicetify.Player.data;
@@ -58,12 +165,24 @@
     );
   }
 
+  function validPlaylistContext(playing) {
+    return Boolean(playing.account && /^spotify:playlist:[a-zA-Z0-9]+$/.test(playing.context) &&
+      isTrack(playing.uri) && playing.provider === 'context' &&
+      !Spicetify.Player.data?.item?.metadata?.is_advertisement);
+  }
+
+  function validQueueContext(playing) {
+    return Boolean(playing.account && /^spotify:playlist:[a-zA-Z0-9]+$/.test(playing.context) &&
+      isTrack(playing.uri) && playing.provider === 'queue' &&
+      !Spicetify.Player.data?.item?.metadata?.is_advertisement);
+  }
+
   function removalState() {
     const playing = observeRemoval();
     const api = Spicetify.Platform?.PlaylistAPI;
     const key = `${playing.account}:${playing.context}`;
     if (
-      validSelection(playing) &&
+      (validSelection(playing) || validPlaylistContext(playing) || validQueueContext(playing)) &&
       api?.getMetadata &&
       (!capabilities || capabilities.key !== key ||
         (capabilities.value === null && Date.now() - capabilities.time > 30000))
@@ -75,9 +194,10 @@
         .then((value) => {
           request.value = value;
           window.JshMusic?.mini?.changed?.();
+          notifyDeferred();
         })
         .catch(() => {
-          setTimeout(() => { if (capabilities === request) window.JshMusic?.mini?.changed?.(); }, 30000);
+          setTimeout(() => { if (capabilities === request) { window.JshMusic?.mini?.changed?.(); notifyDeferred(); } }, 30000);
         });
     }
     const permissions = capabilities?.key === key ? capabilities.value : null;
@@ -1115,14 +1235,10 @@
       key.startsWith('__reactFiber$'),
     );
     let fiber = fiberKey ? button[fiberKey] : null;
-    let openMenu = null;
     for (let level = 0; fiber && level < 40; level += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps;
-      if (!openMenu && typeof props?.handleContextMenu === 'function') {
-        openMenu = props.handleContextMenu;
-      }
       if (typeof props?.curateDefault === 'function') {
-        return isTrack(props.uri) ? { openMenu, uri: props.uri } : null;
+        return isTrack(props.uri) ? { uri: props.uri } : null;
       }
     }
     return null;
@@ -1173,10 +1289,7 @@
     for (const button of document.querySelectorAll('button[aria-checked]')) {
       const target = curationTarget(button);
       if (!target) continue;
-      const added = String(savedState(target.uri) === true);
-      if (button.getAttribute('data-jsh-added') !== added) button.setAttribute('data-jsh-added', added);
-      if (button.getAttribute('aria-checked') !== added) button.setAttribute('aria-checked', added);
-      if (button.ariaLabel !== ADD_LABEL) button.setAttribute('aria-label', ADD_LABEL);
+      savedState(target.uri);
     }
   }
 
@@ -1189,6 +1302,8 @@
 
   function invalidateMemberships() {
     capabilities = null;
+    deferredEntry = null;
+    notifyDeferred();
     for (const current of memberships.values()) current.dirty = true;
     if (selector && !selector.busy) {
       selector.updated = 0;
@@ -1197,51 +1312,11 @@
     scheduleAddScan();
   }
 
-  function relabelAddTooltip() {
-    if (!hoveredAddButton?.isConnected) return;
-    const tooltip = document.getElementById('hover-or-focus-tooltip');
-    if (tooltip && tooltip.textContent !== ADD_LABEL) tooltip.textContent = ADD_LABEL;
-  }
-
-  window.addEventListener(
-    'click',
-    (event) => {
-      const button =
-        event.target instanceof Element && event.target.closest('button[aria-checked]');
-      const target = button && curationTarget(button);
-      if (!target?.openMenu) return;
-      event.preventDefault();
-      event.stopPropagation();
-      window.JshMusic?.feedback?.(button, 'press');
-      target.openMenu({
-        clientX: event.clientX,
-        clientY: event.clientY,
-        currentTarget: button,
-        nativeEvent: event,
-        persist() {},
-        preventDefault() {},
-        stopPropagation() {},
-        target: button,
-        type: event.type,
-      });
-    },
-    true,
-  );
-  window.addEventListener(
-    'pointerover',
-    (event) => {
-      const button =
-        event.target instanceof Element && event.target.closest('button[aria-checked]');
-      hoveredAddButton = button && curationTarget(button) ? button : null;
-    },
-    true,
-  );
   for (const api of [Spicetify.Platform?.PlaylistAPI, Spicetify.Platform?.LibraryAPI, Spicetify.Platform?.RootlistAPI, getCurationAPI()]) {
     api?.getEvents?.()?.addListener?.('operation_complete', invalidateMemberships);
   }
   Spicetify.Platform?.LibraryAPI?.getEvents?.()?.addListener?.('update_item', invalidateMemberships);
   new MutationObserver((records) => {
-    relabelAddTooltip();
     if (records.some(({ type, target, addedNodes, removedNodes }) =>
       type === 'attributes' || target.closest?.('button[aria-checked]') ||
       [...addedNodes, ...removedNodes].some((node) => node.nodeType === 1 &&
@@ -1351,5 +1426,12 @@
   window.addEventListener('keydown', handleShortcut, true);
   window.JshMusic ||= {};
   window.JshMusic.add = { toggle: toggleOverlay, state: savedState, removalState, changePlayingPlaylist,
-    playlistSelection, toggleSelectedPlaylist };
+    playlistSelection, toggleSelectedPlaylist, deferredState, toggleDeferred,
+    onDeferredChange: (listener) => { deferredListeners.add(listener); return () => deferredListeners.delete(listener); } };
+  Spicetify.Player.addEventListener?.('songchange', deferredSongChange);
+  // Spotify can publish songchange before the entry UID arrives; subsequent player
+  // updates must refresh eligibility even when the track URI is unchanged.
+  Spicetify.Player.origin?._events?.addListener?.('update', () => {
+    Promise.resolve().then(deferredSongChange);
+  });
 })();

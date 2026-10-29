@@ -137,7 +137,7 @@ async function checkLyricsWindow(pip, persisted) {
       create(Object.fromEntries(features.split(',').map((entry) => entry.split('='))));
   }
   const run = () =>
-    vm.runInNewContext(fs.readFileSync('src/spicetify/lyrics.js', 'utf8'), {
+    vm.runInNewContext(fs.readFileSync('modules/lyrics/lyrics.js', 'utf8'), {
       window,
       document: document(),
       Spicetify,

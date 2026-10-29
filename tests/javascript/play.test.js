@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'spicetify', 'play.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', '..', 'modules', 'playback', 'play.js'), 'utf8');
 const document = {
   head: { append() {} },
   createElement: () => ({}),
@@ -18,6 +18,66 @@ test('quality text is hidden before the playback API is ready', () => {
   vm.runInNewContext(source, { MutationObserver: class { observe() {} }, document: startupDocument, window: {}, setTimeout() {} });
   assert.equal(styles.length, 1);
   assert.match(styles[0].textContent, /\.main-trackInfo-overlay:has\(button\) \{ display: none !important; \}/);
+});
+
+for (const modern of [false, true]) test(`seek controls stay between wrapped Spotify controls after a re-render (${modern ? 'current' : 'legacy'} layout)`, () => {
+  class Node {
+    constructor(name) { this.name = name; this.children = []; this.className = ''; }
+    append(child) {
+      if (child.parentElement) child.parentElement.children.splice(child.parentElement.children.indexOf(child), 1);
+      child.parentElement = this;
+      this.children.push(child);
+    }
+    get previousElementSibling() { return this.parentElement?.children[this.parentElement.children.indexOf(this) - 1]; }
+    get nextElementSibling() { return this.parentElement?.children[this.parentElement.children.indexOf(this) + 1]; }
+    insert(node, offset) {
+      const parent = this.parentElement;
+      if (node.parentElement) node.parentElement.children.splice(node.parentElement.children.indexOf(node), 1);
+      parent.children.splice(parent.children.indexOf(this) + offset, 0, node);
+      node.parentElement = parent;
+    }
+    before(node) { this.insert(node, 0); }
+    after(node) { this.insert(node, 1); }
+    closest(selector) {
+      let node = this;
+      while (node && node.name !== (selector === '[data-testid="general-controls"]' ? 'general-controls' : selector.slice(1))) node = node.parentElement;
+      return node;
+    }
+  }
+  const controls = new Node('general-controls');
+  const left = new Node(modern ? 'left' : 'player-controls__left');
+  const right = new Node(modern ? 'right' : 'player-controls__right');
+  controls.append(left); controls.append(new Node('play')); controls.append(right);
+  const wrap = (parent, name) => { const wrapper = new Node(name); const button = new Node(name + '-button'); parent.append(wrapper); wrapper.append(button); return button; };
+  wrap(left, 'shuffle');
+  let previous = wrap(left, 'previous');
+  const next = wrap(right, 'next');
+  wrap(right, 'repeat');
+  const seek = (direction) => [...left.children, ...right.children].find((node) => node.className.includes(`jsh-seek-${direction}`));
+  const bar = {
+    querySelector(selector) {
+      if (selector.includes('skip-back')) return previous;
+      if (selector.includes('skip-forward')) return next;
+      if (selector === '.jsh-seek-back') return seek('back');
+      if (selector === '.jsh-seek-forward') return seek('forward');
+      return null;
+    },
+    querySelectorAll: () => [seek('back'), seek('forward')].filter(Boolean),
+  };
+  let decorate;
+  const Spicetify = {
+    Player: { data: {}, playUri() {}, addEventListener: (_, listener) => { decorate = listener; } },
+    Platform: { History: { location: { pathname: '/' }, listen() {} } },
+  };
+  const playerDocument = { ...document, body: {}, createElement: () => new Node('seek'), querySelector: (selector) => modern ? (selector.includes('[data-testid="now-playing-bar"]') ? bar : null) : (selector.includes('.main-nowPlayingBar-nowPlayingBar') ? bar : null) };
+  vm.runInNewContext(source, { document: playerDocument, window: { Spicetify, addEventListener() {} }, Spicetify, MutationObserver: class { observe() {} } });
+  const names = (group) => group.children.map((node) => node.className.includes('jsh-seek-') ? node.className.split(' ').at(-1) : node.name);
+  assert.deepEqual(names(left), ['shuffle', 'jsh-seek-back', 'previous']);
+  assert.deepEqual(names(right), ['next', 'jsh-seek-forward', 'repeat']);
+  left.children.pop();
+  previous = wrap(left, 'previous');
+  decorate();
+  assert.deepEqual(names(left), ['shuffle', 'jsh-seek-back', 'previous']);
 });
 
 async function runRoute(pathname, randomValues, options = {}) {
@@ -238,7 +298,8 @@ function clickTitle(playerData, eventOverrides = {}, environment = {}) {
       listeners.push({ capture, listener, type });
     },
   };
-  vm.runInNewContext(source, { MutationObserver: class { observe() {} }, console, document, setInterval, Element, Spicetify, URLSearchParams, window, ...environment });
+  Object.assign(Spicetify.Platform, environment.platform || {});
+  vm.runInNewContext(source, { MutationObserver: class { observe() {} }, console, document, setInterval, setTimeout, Element, Spicetify, URLSearchParams, window, ...environment });
 
   const event = {
     button: 0,
@@ -367,11 +428,218 @@ test('now-playing title highlights the playing row in its playlist', () => {
     {
       pathname: '/playlist/abc',
       search:
-        '?uid=row1&uri=spotify%3Atrack%3At1&page=2&pageUri=spotify%3Aplaylist%3Aabc%3Apage%3A2&index=37',
+        '?uri=spotify%3Atrack%3At1&page=2&pageUri=spotify%3Aplaylist%3Aabc%3Apage%3A2&index=37',
     },
   ]);
   assert.equal(event.defaultPrevented, true);
   assert.equal(event.propagationStopped, true);
+});
+
+test('playlist navigation is immediate and reads only the current position', async () => {
+  const reads = [];
+  const calls = [];
+  const list = { __reactFiber$test: { memoizedState: { memoizedState: { current: {
+    scrollToIndex: (index) => calls.push(index),
+  } } } } };
+  const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+  const env = { platform: { History: history, PlaylistAPI: { getContents: async (uri, options) => {
+    reads.push({ uri, ...options });
+    return { items: [{ uri: 'spotify:track:t1', uid: 'playlist-row' }] };
+  } } }, document: { ...document, querySelector: (selector) => selector === '.main-trackList-trackList' ? list : null } };
+  const h = clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uid: 'queue-id', uri: 'spotify:track:t1', provider: 'queue' }, index: { itemIndex: 37 } }, {}, env);
+  assert.equal(history.location.pathname, '/playlist/abc');
+  assert.doesNotMatch(history.location.search, /uid=/);
+  assert.equal(h.event.defaultPrevented, true);
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(JSON.stringify(reads)), [{ uri: 'spotify:playlist:abc', offset: 37, limit: 1 }]);
+  assert.deepEqual(calls, [37]);
+});
+
+test('a mismatched playback index never scrolls to a different song', async () => {
+  const calls = [];
+  const list = { __reactFiber$test: { memoizedState: { memoizedState: { current: { scrollToIndex: (index) => calls.push(index) } } } } };
+  const env = { platform: { PlaylistAPI: { getContents: async () => ({ items: [{ uri: 'spotify:track:other' }] }) } },
+    document: { ...document, querySelector: (selector) => selector === '.main-trackList-trackList' ? list : null } };
+  const h = clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uri: 'spotify:track:t1' }, index: { itemIndex: 4 } }, {}, env);
+  assert.equal(h.pushed[0].pathname, '/playlist/abc');
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, []);
+});
+
+test('missing playback position finds the track in small batches after immediate navigation', async () => {
+  const reads = [];
+  const calls = [];
+  const list = { __reactFiber$test: { memoizedState: { memoizedState: { current: {
+    scrollToIndex: (index) => calls.push(index),
+  } } } } };
+  const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+  const env = { platform: { History: history, PlaylistAPI: { getContents: async (_uri, options) => {
+    reads.push(options.offset);
+    return options.offset === 0
+      ? { items: Array.from({ length: 100 }, () => ({ uri: 'spotify:track:other' })), totalLength: 101 }
+      : { items: [{ uri: 'spotify:track:t1' }], totalLength: 101 };
+  } } }, document: { ...document, querySelector: (selector) => selector === '.main-trackList-trackList' ? list : null } };
+  clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uri: 'spotify:track:t1' } }, {}, env);
+  assert.equal(history.location.pathname, '/playlist/abc');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(reads, [0, 100]);
+  assert.deepEqual(calls, [100]);
+});
+
+test('large playlist uses lightweight Spotify rows and scrolls the real viewport', async () => {
+  const reads = [];
+  const scroller = { scrollTop: 0, clientHeight: 600, getBoundingClientRect: () => ({ top: 50 }) };
+  const list = { closest: () => scroller, getBoundingClientRect: () => ({ top: 450 }),
+    querySelector: () => ({ offsetHeight: 36 }) };
+  const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+  const api = { getContents: async (_uri, options) => {
+    assert.equal(options.offset, 2999);
+    return { items: [{ uri: 'spotify:track:t1', uid: 'row2999' }] };
+  },
+    _playlistDataClient: { get: async (request) => {
+      reads.push(request);
+      return { data: { item: Array.from({ length: 3001 }, (_, i) => ({
+        uri: i === 2999 ? 'spotify:track:t1' : 'spotify:track:other', rowId: `row${i}`,
+      })) } };
+    } } };
+  const env = { platform: { History: history, PlaylistAPI: api },
+    document: { ...document, querySelector: (selector) => selector.includes('main-trackList-trackList') ? list : null },
+    getComputedStyle: () => ({ getPropertyValue: () => '56px' }) };
+  clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uid: 'row2999', uri: 'spotify:track:t1' } }, {}, env);
+  assert.equal(history.location.pathname, '/playlist/abc');
+  await new Promise(setImmediate);
+  assert.equal(reads.length, 1);
+  assert.equal(scroller.scrollTop, 400 + 36 + 2999 * 56 - 300);
+});
+
+test('jump waits for the virtualized playing row and centers that row', async () => {
+  const timers = [];
+  let revealed = false;
+  let centered = false;
+  let requestedIndex = null;
+  const row = { __reactFiber$test: { memoizedProps: { uri: 'spotify:track:t1' } },
+    scrollIntoView: (options) => { centered = options.block === 'center'; } };
+  const list = { __reactFiber$test: { memoizedState: { memoizedState: { current: {
+    scrollToIndex: (index) => { requestedIndex = index; },
+  } } } }, querySelectorAll: () => revealed ? [row] : [] };
+  const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+  const env = { platform: { History: history, PlaylistAPI: { getContents: async () => ({ items: [{ uri: 'spotify:track:t1' }] }) } },
+    document: { ...document, querySelector: (selector) => selector.includes('main-trackList-trackList') ? list : null },
+    setTimeout: (fn) => { timers.push(fn); } };
+  clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uri: 'spotify:track:t1' }, index: { itemIndex: 2999 } }, {}, env);
+  await new Promise(setImmediate);
+  assert.equal(requestedIndex, 2999);
+  assert.equal(centered, false, 'the first scroll is not proof of success');
+  revealed = true;
+  timers.shift()();
+  assert.equal(centered, true);
+});
+
+test('a compacted lightweight response falls back to the exact playlist occurrence', async () => {
+  const calls = [];
+  const list = { __reactFiber$test: { memoizedState: { memoizedState: { current: {
+    scrollToIndex: (index) => calls.push(index),
+  } } } } };
+  const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+  const api = { _playlistDataClient: { get: async () => ({ data: { item: [
+    { uri: 'spotify:track:t1', rowId: 'exact' },
+  ] } }) }, getContents: async (_uri, { offset, limit }) => ({ items: limit === 1
+    ? [{ uri: 'spotify:track:other' }]
+    : [{ uri: 'spotify:track:t1', uid: 'duplicate' }, { uri: 'spotify:track:t1', uid: 'exact' }], totalLength: 2 }) };
+  const env = { platform: { History: history, PlaylistAPI: api },
+    document: { ...document, querySelector: (selector) => selector.includes('main-trackList-trackList') ? list : null } };
+  clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uri: 'spotify:track:t1', uid: 'exact' } }, {}, env);
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [1]);
+});
+
+for (const [state, expectedSortBy] of [
+  [{ field: 'ADDED_AT', order: 'DESC' }, 14],
+  [{ field: 'TITLE', order: 'ASC' }, 11],
+  [{ column: 'TITLE_AND_ARTIST', order: 4 }, 10],
+]) {
+  test(`jump uses Spotify playlist sort ${JSON.stringify(state)}`, async () => {
+    const calls = [];
+    const list = { __reactFiber$test: { memoizedState: { memoizedState: { current: {
+      scrollToIndex: (index) => calls.push(index),
+    } } } } };
+    const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+    let request;
+    const api = { getContents: async (_uri, options) => {
+      assert.equal(options.offset, 1);
+      return { items: [{ uri: 'spotify:track:t1', uid: 'exact' }] };
+    },
+      _playlistDataClient: { get: async (value) => {
+        request = value;
+        return { data: { item: [{ uri: 'spotify:track:other' }, { uri: 'spotify:track:t1', rowId: 'exact' }] } };
+      } } };
+    const env = { platform: { History: history, PlaylistAPI: api,
+      LocalStorageAPI: { getItem: () => ({ 'spotify:playlist:abc': state }) } },
+      document: { ...document, querySelector: (selector) => selector === '.main-trackList-trackList' ? list : null } };
+    clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uid: 'exact', uri: 'spotify:track:t1' }, index: { itemIndex: 99 } }, {}, env);
+    await new Promise(setImmediate);
+    assert.equal(request.query.sortBy, expectedSortBy);
+    assert.deepEqual(calls, [1]);
+  });
+}
+
+test('sorted lookup preserves Spotify sort when the lightweight service is unavailable', async () => {
+  const reads = [];
+  const calls = [];
+  const list = { __reactFiber$test: { memoizedState: { memoizedState: { current: {
+    scrollToIndex: (index) => calls.push(index),
+  } } } } };
+  const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+  const env = { platform: { History: history,
+    LocalStorageAPI: { getItem: () => ({ 'spotify:playlist:abc': { field: 'ARTIST', order: 'DESC' } }) },
+    PlaylistAPI: { getContents: async (_uri, options) => {
+      reads.push(options);
+      return { items: [{ uri: 'spotify:track:other' }, { uri: 'spotify:track:t1' }], totalLength: 2 };
+    } } }, document: { ...document, querySelector: (selector) => selector === '.main-trackList-trackList' ? list : null } };
+  clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uri: 'spotify:track:t1' } }, {}, env);
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(JSON.stringify(reads)), [{ offset: 0, limit: 100, sort: { field: 'ARTIST', order: 'DESC' } }]);
+  assert.deepEqual(calls, [1]);
+});
+
+test('the rendered playlist sort takes precedence over stale saved sort', async () => {
+  let request;
+  let centered = false;
+  const row = { __reactFiber$test: { memoizedProps: { uri: 'spotify:track:t1' } },
+    scrollIntoView: () => { centered = true; } };
+  const provider = { memoizedProps: { value: { sortState: { field: 'ARTIST', order: 'DESC' }, setSortState() {} } } };
+  const list = { __reactFiber$test: { return: provider, memoizedState: { memoizedState: { current: {
+    scrollToIndex() {},
+  } } } }, querySelectorAll: () => [row] };
+  const history = { location: { pathname: '/' }, listen() {}, push(location) { this.location = location; } };
+  const env = { platform: { History: history,
+    LocalStorageAPI: { getItem: () => ({ 'spotify:playlist:abc': { field: 'TITLE', order: 'ASC' } }) },
+    PlaylistAPI: { getContents: async () => ({ items: [{ uri: 'spotify:track:t1' }] }), _playlistDataClient: { get: async (value) => {
+      request = value; return { data: { item: [{ uri: 'spotify:track:t1', rowId: 'row' }] } };
+    } } } }, document: { ...document, querySelector: (selector) => selector.includes('main-trackList-trackList') ? list : null } };
+  clickTitle({ context: { uri: 'spotify:playlist:abc' }, item: { uri: 'spotify:track:t1' } }, {}, env);
+  await new Promise(setImmediate);
+  assert.equal(request.query.sortBy, 10);
+  assert.equal(centered, true);
+});
+
+test('navigation does not wait for Spotify and a stale result cannot scroll', async () => {
+  let release;
+  const reads = [];
+  const h = clickTitle({ context: { uri: 'spotify:playlist:abc' },
+    item: { uri: 'spotify:track:t1' }, index: { itemIndex: 4 } }, {}, {
+    platform: { PlaylistAPI: { getContents: (_uri, options) => {
+      reads.push(options);
+      return new Promise((resolve) => { release = resolve; });
+    } } },
+  });
+  assert.equal(h.pushed[0].pathname, '/playlist/abc');
+  assert.equal(reads.length, 1);
+  h.Spicetify.Player.data.item.uri = 'spotify:track:other';
+  release({ items: [{ uri: 'spotify:track:t1' }] });
+  await new Promise(setImmediate);
+  assert.equal(h.pushed.length, 1);
+  assert.equal(reads.length, 1);
 });
 
 for (const selector of [
@@ -393,7 +661,7 @@ for (const selector of [
     const { event, pushed } = clickTitle(data, { target: new Element(selector) });
     assert.deepEqual(pushed, [{
       pathname: '/playlist/abc',
-      search: '?uid=row1&uri=spotify%3Atrack%3At1&page=2&pageUri=spotify%3Aplaylist%3Aabc%3Apage%3A2&index=37',
+      search: '?uri=spotify%3Atrack%3At1&page=2&pageUri=spotify%3Aplaylist%3Aabc%3Apage%3A2&index=37',
     }]);
     assert.equal(event.defaultPrevented, true);
     assert.equal(event.propagationStopped, true);

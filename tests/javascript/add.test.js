@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'spicetify', 'add.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', '..', 'modules', 'library', 'add.js'), 'utf8');
 
 test('playlist overlay backgrounds survive missing Spicetify theme variables', () => {
   assert.match(
@@ -15,10 +15,9 @@ test('playlist overlay backgrounds survive missing Spicetify theme variables', (
   assert.match(source, /\.item-card \{[^}]*background-color: var\(--adder-fill\)/);
 });
 
-test('native plus opens the playlist menu on macOS', () => {
+test('native curation button keeps Spotify click and tooltip behavior', () => {
   const listeners = {};
   const shortcuts = [];
-  let menuEvent;
   class Element {
     closest(selector) {
       return selector === 'button[aria-checked]' ? this : null;
@@ -30,9 +29,6 @@ test('native plus opens the playlist menu on macOS', () => {
   button.__reactFiber$test = {
     memoizedProps: {
       curateDefault() {},
-      handleContextMenu(event) {
-        menuEvent = event;
-      },
       uri: 'spotify:track:test',
     },
   };
@@ -68,31 +64,21 @@ test('native plus opens the playlist menu on macOS', () => {
     },
   });
 
-  const event = {
-    target: button,
-    type: 'click',
-    preventDefault() {
-      this.prevented = true;
-    },
-    stopPropagation() {
-      this.stopped = true;
-    },
-  };
-  listeners.click(event);
-  assert.equal(button.ariaLabel, 'Add to Playlists');
-  assert.equal(menuEvent.currentTarget, button);
-  assert.equal(event.prevented, true);
-  assert.equal(event.stopped, true);
+  assert.equal(listeners.click, undefined);
+  assert.equal(button.ariaLabel, undefined);
   assert.equal(shortcuts[0].meta, true);
 });
 
 function addHarness(buttons = [], options = {}) {
   const Platform = { LocalStorageAPI: { namespace: 'first-account' }, ...options.Platform };
   const observers = [];
+  const playerEvents = {};
   let scanCount = 0;
   const Spicetify = {
     Platform,
-    Player: { data: { item: { uri: 'spotify:track:first' } } },
+    Player: { data: { item: { uri: 'spotify:track:first' } },
+      origin: { _events: { addListener: (name, callback) => { playerEvents[`origin-${name}`] = callback; } } },
+      addEventListener: (name, callback) => { playerEvents[name] = callback; } },
     ContextMenu: {},
     Keyboard: { registerShortcut() {} },
     showNotification() {},
@@ -118,7 +104,8 @@ function addHarness(buttons = [], options = {}) {
     setTimeout: () => 0,
   });
   return { api: window.JshMusic.add, window, Platform, Spicetify,
-    mutate: (records) => observers[0](records), scans: () => scanCount };
+    mutate: (records) => observers[0](records), scans: () => scanCount,
+    songchange: () => playerEvents.songchange(), update: () => playerEvents['origin-update']() };
 }
 
 test('Add state excludes Liked/Loved Songs, fails closed, and follows account and track changes', async () => {
@@ -228,6 +215,140 @@ function removalHarness(options = {}) {
     change: (action, state = h.api.removalState()) => h.api.changePlayingPlaylist(action, state),
   };
 }
+
+test('deferred removal is reversible until playback changes and removes only the captured occurrence', async () => {
+  const h = removalHarness();
+  await h.selection();
+  assert.equal(h.api.deferredState().mode, 'remove');
+  h.api.toggleDeferred();
+  assert.equal(h.api.deferredState().selected, true);
+  h.songchange();
+  assert.equal(h.mutations.length, 0);
+  h.api.toggleDeferred();
+  h.data.item = { uri: 'spotify:track:next', uid: 'next', provider: 'context' };
+  h.songchange();
+  await new Promise(setImmediate);
+  assert.equal(h.mutations.length, 0);
+  h.data.item = { uri: 'spotify:track:first', uid: 'playing', provider: 'context' };
+  h.songchange();
+  h.api.toggleDeferred();
+  h.data.context.uri = 'spotify:playlist:other';
+  h.data.item = { uri: 'spotify:track:next', uid: 'next', provider: 'context' };
+  h.songchange();
+  h.songchange();
+  await new Promise(setImmediate);
+  assert.equal(h.mutations.length, 1);
+  assert.equal(h.mutations[0].context, 'spotify:playlist:one');
+  assert.equal(h.mutations[0].items[0].uid, 'playing');
+  assert.ok(h.rows.some((row) => row.uid === 'duplicate'));
+});
+
+test('deferred hide is limited to eligible personalized contexts and captures the original playlist', async () => {
+  const h = removalHarness();
+  const calls = [];
+  h.Platform.PlaylistAPI.getMetadata = async () => ({ canRemove: false, name: 'Made for you' });
+  const feedback = { getCapabilities: () => ({ canBan: true }),
+    addContextTrackBan: async (...args) => calls.push(args) };
+  h.Platform.Registry = { resolve: (key) => key === Symbol.for('FeedbackAPI') ? feedback : null };
+  h.data.context.metadata = { format_list_type: 'artistsets' };
+  await h.selection();
+  assert.equal(h.api.deferredState().mode, 'hide');
+  h.api.toggleDeferred();
+  assert.equal(calls.length, 0);
+  h.data.item = { uri: 'spotify:track:next', uid: 'next', provider: 'context' };
+  h.songchange();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [['spotify:playlist:one', 'spotify:track:first', 'context']]);
+  h.data.context.metadata.format_list_type = 'ordinary';
+  assert.equal(h.api.deferredState().mode, null);
+});
+
+test('deferred removal fails closed on account or permission changes', async () => {
+  const accountChange = removalHarness();
+  await accountChange.selection();
+  accountChange.api.toggleDeferred();
+  accountChange.Platform.LocalStorageAPI.namespace = 'other';
+  accountChange.songchange();
+  await new Promise(setImmediate);
+  assert.equal(accountChange.mutations.length, 0);
+  const permissionChange = removalHarness();
+  await permissionChange.selection();
+  permissionChange.api.toggleDeferred();
+  permissionChange.Platform.PlaylistAPI.getMetadata = async () => ({ canRemove: false });
+  permissionChange.data.item.uid = 'next';
+  permissionChange.songchange();
+  await new Promise(setImmediate);
+  assert.equal(permissionChange.mutations.length, 0);
+});
+
+test('deferred removal finds an unambiguous playlist entry when Spotify omits its UID', async () => {
+  const h = removalHarness();
+  h.rows = h.rows.filter((row) => row.uid !== 'duplicate');
+  h.data.item.uid = '';
+  await h.selection();
+  h.api.deferredState();
+  await new Promise(setImmediate);
+  assert.equal(h.api.deferredState().mode, 'remove');
+  h.api.toggleDeferred();
+  h.data.item.uid = 'playing';
+  h.update();
+  await new Promise(setImmediate);
+  assert.equal(h.api.deferredState().selected, true);
+  assert.equal(h.mutations.length, 0);
+  h.data.item = { uri: 'spotify:track:next', uid: 'next', provider: 'context' };
+  h.update();
+  await new Promise(setImmediate);
+  assert.equal(h.mutations[0].items[0].uid, 'playing');
+});
+
+test('deferred removal does not guess between duplicate playlist entries when UID is missing', async () => {
+  const h = removalHarness();
+  h.data.item.uid = '';
+  await h.selection();
+  h.api.deferredState();
+  await new Promise(setImmediate);
+  assert.equal(h.api.deferredState().mode, null);
+  h.data.item.uid = 'playing';
+  h.update();
+  await new Promise(setImmediate);
+  assert.equal(h.api.deferredState().mode, 'remove');
+});
+
+test('queued entries resolve playlist UIDs without guessing between duplicates', async () => {
+  const h = removalHarness();
+  h.data.item.provider = 'queue';
+  await h.selection();
+  h.api.deferredState();
+  await new Promise(setImmediate);
+  assert.equal(h.api.deferredState().mode, 'remove');
+  h.api.toggleDeferred();
+  h.data.item = { uri: 'spotify:track:next', uid: 'next', provider: 'context' };
+  h.songchange();
+  await new Promise(setImmediate);
+  assert.equal(h.mutations[0].items[0].uid, 'playing');
+  const other = removalHarness();
+  other.data.item.provider = 'queue';
+  other.data.item.uid = 'queue-only-uid';
+  await other.selection();
+  other.api.deferredState();
+  await new Promise(setImmediate);
+  assert.equal(other.api.deferredState().mode, null);
+  for (const queueUid of ['queue-only-uid', '']) {
+    const unique = removalHarness();
+    unique.rows = unique.rows.filter((row) => row.uid !== 'duplicate');
+    unique.data.item.provider = 'queue';
+    unique.data.item.uid = queueUid;
+    await unique.selection();
+    unique.api.deferredState();
+    await new Promise(setImmediate);
+    assert.equal(unique.api.deferredState().mode, 'remove');
+    unique.api.toggleDeferred();
+    unique.data.item = { uri: 'spotify:track:next', uid: 'next', provider: 'context' };
+    unique.songchange();
+    await new Promise(setImmediate);
+    assert.equal(unique.mutations[0].items[0].uid, 'playing');
+  }
+});
 
 test('Remove deletes the playing duplicate only; Undo restores its position and repeated Remove uses the new UID', async () => {
   const h = removalHarness();

@@ -1,0 +1,9 @@
+{
+  "settings": ["settings.js"],
+  "library": ["add.js"],
+  "playback": ["play.js"],
+  "library-controls": ["like.js", "loved-cover.js", "love.js", "remove-later.js"],
+  "lyrics": ["lyrics.js"],
+  "mini": ["mini.js"],
+  "shortcuts": ["keys.js"]
+}

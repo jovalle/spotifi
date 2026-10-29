@@ -20,13 +20,13 @@ dev = ["ruff>=0.11,<1", "build>=1.2,<2"]
 packages = ["src/spotifi"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/spicetify" = "spotifi/resources/src/spicetify"
+"modules" = "spotifi/resources/modules"
 "src/streamdeck" = "spotifi/resources/src/streamdeck"
 "src/mini-player.swift" = "spotifi/resources/src/mini-player.swift"
 "conf" = "spotifi/resources/conf"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/conf", "/tests", "/assets", "/bin", "/justfile", "/README.md", "/LICENSE", "/pyproject.toml"]
+include = ["/src", "/modules", "/conf", "/tests", "/assets", "/bin", "/justfile", "/Makefile", "/README.md", "/LICENSE", "/pyproject.toml"]
 exclude = ["**/logs/**", "**/__pycache__/**"]
 
 [tool.ruff]
