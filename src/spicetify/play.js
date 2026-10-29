@@ -17,9 +17,19 @@
   const playRoute =
     /^\/search\/spotifi-play-(library|180g|liked|playlist)-(sequential|shuffle|smart-shuffle)-/;
   const likedSongsUri = 'spotify:collection:tracks';
-  const nowPlayingTitle = [
+  const nowPlayingTarget = [
     '.main-nowPlayingWidget-trackInfo .main-trackInfo-name a',
     '.main-nowPlayingView-trackInfo .main-trackInfo-name a',
+    '[data-testid="now-playing-widget"] .main-trackInfo-name a',
+    // The v2 title has no stable class or test ID; exclude its artist byline.
+    '[data-testid="now-playing-widget-v2"] a[href]:not([data-testid="now-playing-widget-v2-byline"] a)',
+    '[data-testid="now-playing-widget"] [data-testid="cover-art-button"]',
+    '[data-testid="now-playing-widget-v2"] [data-testid="cover-art-button"]',
+    '[data-testid="cover-art-slot"] a[href]',
+    '[data-testid="track-visual-enhancement"] a[data-testid="context-link"]',
+    '[data-testid="NPV_Panel_OpenDiv"] .main-trackInfo-name a',
+    // shortcut: NPV exposes only a hashed title class; replace when Spotify adds a stable selector.
+    '.hvJdEwDFPYnCjweD6tWI > :first-child a',
   ].join(', ');
 
   if (!window.Spicetify || !Spicetify.Player?.playUri || !Spicetify.Platform?.History) {
@@ -29,7 +39,6 @@
 
   let handlingRoute = false;
   let lastSafePath = null;
-  let observedBar;
 
   function queueCount() {
     // Spotify prefetches hidden tracks beyond the end of the visible queue.
@@ -47,10 +56,6 @@
   function decoratePlayer() {
     const bar = document.querySelector('.main-nowPlayingBar-nowPlayingBar');
     if (!bar) return;
-    if (observedBar !== bar) {
-      observedBar = bar;
-      new MutationObserver(decoratePlayer).observe(bar, { childList: true, subtree: true });
-    }
     for (const [direction, method] of [['back', 'skipBack'], ['forward', 'skipForward']]) {
       const native = bar.querySelector(`[data-testid="control-button-skip-${direction}"]`);
       if (!native || bar.querySelector(`.jsh-seek-${direction}`)) continue;
@@ -63,8 +68,10 @@
       if (direction === 'back') native.before(button);
       else native.after(button);
     }
-    for (const button of bar.querySelectorAll('.jsh-seek-back, .jsh-seek-forward'))
-      button.disabled = Spicetify.Player.data?.restrictions?.canSeek === false;
+    for (const button of bar.querySelectorAll('.jsh-seek-back, .jsh-seek-forward')) {
+      const disabled = Spicetify.Player.data?.restrictions?.canSeek === false;
+      if (button.disabled !== disabled) button.disabled = disabled;
+    }
 
     const info = bar.querySelector('.main-nowPlayingWidget-trackInfo');
     if (info && !info.querySelector('.jsh-playing-album')) {
@@ -80,8 +87,9 @@
       if (album.textContent !== name) album.textContent = name;
       const href = albumUri?.startsWith('spotify:album:') ? Spicetify.URI.fromString(albumUri).toURLPath(true) : '';
       if (href && album.getAttribute('href') !== href) album.setAttribute('href', href);
-      if (!href) album.removeAttribute('href');
-      album.hidden = !href || !name;
+      if (!href && album.hasAttribute('href')) album.removeAttribute('href');
+      const hidden = !href || !name;
+      if (album.hidden !== hidden) album.hidden = hidden;
     }
     const queue = bar.querySelector('[data-testid="control-button-queue"]');
     if (queue && !queue.querySelector('.jsh-queue-count')) {
@@ -103,7 +111,16 @@
 
   window.JshMusic ||= {};
   window.JshMusic.play = { queueCount, openQueue, randomize: (validate) => playSelection('randomize', 'current', validate) };
-  setInterval(decoratePlayer, 1000);
+  Spicetify.Player.addEventListener?.('songchange', decoratePlayer);
+  Spicetify.Platform.PlayerAPI?.getEvents?.()?.addListener?.('queue_update', decoratePlayer);
+  const playerControls = '.main-nowPlayingBar-nowPlayingBar, .main-nowPlayingWidget-trackInfo, [data-testid="control-button-queue"], [data-testid="control-button-skip-back"], [data-testid="control-button-skip-forward"]';
+  new MutationObserver((records) => {
+    if (records.some(({ target, addedNodes, removedNodes }) =>
+      target.closest?.('.main-nowPlayingWidget-trackInfo') ||
+      [...addedNodes, ...removedNodes].some((node) => node.nodeType === 1 &&
+        (node.matches(playerControls) || node.querySelector(playerControls)))))
+      decoratePlayer();
+  }).observe(document.body, { childList: true, subtree: true });
   decoratePlayer();
 
   function playlistsFrom(rows) {
@@ -318,7 +335,7 @@
         Spicetify.Platform.History.push(album.getAttribute('href'));
         return;
       }
-      if (!event.target.closest(nowPlayingTitle)) return;
+      if (!event.target.closest(nowPlayingTarget)) return;
       const location = nowPlayingContextLocation();
       if (!location) return;
       event.preventDefault();

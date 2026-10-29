@@ -15,7 +15,7 @@ const setInterval = () => {};
 test('quality text is hidden before the playback API is ready', () => {
   const styles = [];
   const startupDocument = { ...document, head: { append: (style) => styles.push(style) } };
-  vm.runInNewContext(source, { document: startupDocument, window: {}, setTimeout() {} });
+  vm.runInNewContext(source, { MutationObserver: class { observe() {} }, document: startupDocument, window: {}, setTimeout() {} });
   assert.equal(styles.length, 1);
   assert.match(styles[0].textContent, /\.main-trackInfo-overlay:has\(button\) \{ display: none !important; \}/);
 });
@@ -104,7 +104,7 @@ async function runRoute(pathname, randomValues, options = {}) {
     },
   };
 
-  vm.runInNewContext(source, { console, document, setInterval, Spicetify, Uint32Array, URLSearchParams, window });
+  vm.runInNewContext(source, { MutationObserver: class { observe() {} }, console, document, setInterval, Spicetify, Uint32Array, URLSearchParams, window });
   if (options.randomize) await window.JshMusic.play.randomize(options.validate);
   for (let attempt = 0; attempt < 20 && !calls.play; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
@@ -211,8 +211,11 @@ const barTitle = '.main-nowPlayingWidget-trackInfo .main-trackInfo-name a';
 function clickTitle(playerData, eventOverrides = {}, environment = {}) {
   const pushed = [];
   const listeners = [];
+  let onSongChange;
+  let onQueueChange;
   const Spicetify = {
     Platform: {
+      PlayerAPI: { getEvents: () => ({ addListener(type, callback) { if (type === 'queue_update') onQueueChange = callback; } }) },
       History: {
         listen() {},
         location: { pathname: '/' },
@@ -221,7 +224,7 @@ function clickTitle(playerData, eventOverrides = {}, environment = {}) {
         },
       },
     },
-    Player: { data: playerData, playUri() {} },
+    Player: { data: playerData, playUri() {}, addEventListener(type, callback) { if (type === 'songchange') onSongChange = callback; } },
     URI: {
       fromString(uri) {
         const [, type, id] = uri.split(':');
@@ -235,7 +238,7 @@ function clickTitle(playerData, eventOverrides = {}, environment = {}) {
       listeners.push({ capture, listener, type });
     },
   };
-  vm.runInNewContext(source, { console, document, setInterval, Element, Spicetify, URLSearchParams, window, ...environment });
+  vm.runInNewContext(source, { MutationObserver: class { observe() {} }, console, document, setInterval, Element, Spicetify, URLSearchParams, window, ...environment });
 
   const event = {
     button: 0,
@@ -253,7 +256,7 @@ function clickTitle(playerData, eventOverrides = {}, environment = {}) {
   for (const { capture, listener, type } of listeners) {
     if (type === 'click' && capture) listener(event);
   }
-  return { event, pushed, Spicetify, play: window.JshMusic.play };
+  return { event, pushed, Spicetify, onSongChange, onQueueChange, play: window.JshMusic.play };
 }
 
 test('Queue embeds a badge for upcoming tracks and hides empty or unavailable queues', () => {
@@ -277,7 +280,7 @@ test('Queue embeds a badge for upcoming tracks and hides empty or unavailable qu
       createElement: () => ({ textContent: '' }),
       querySelector: (selector) => selector === '.main-nowPlayingBar-nowPlayingBar' ? bar : null,
     },
-    setInterval: (callback) => { refresh = callback; },
+    setInterval: () => assert.fail('Player UI must not poll'),
     MutationObserver: class { observe() {} },
   });
   assert.equal(children.length, 1);
@@ -285,6 +288,7 @@ test('Queue embeds a badge for upcoming tracks and hides empty or unavailable qu
   assert.ok(classes.has('jsh-queue-button'));
   assert.equal(attributes['aria-describedby'], children[0].id);
 
+  refresh = h.onQueueChange;
   h.Spicetify.Queue = {
     track: { uri: 'spotify:track:current' },
     prevTracks: [{ uri: 'spotify:track:previous' }],
@@ -369,6 +373,41 @@ test('now-playing title highlights the playing row in its playlist', () => {
   assert.equal(event.defaultPrevented, true);
   assert.equal(event.propagationStopped, true);
 });
+
+for (const selector of [
+  '[data-testid="now-playing-widget"] .main-trackInfo-name a',
+  '[data-testid="now-playing-widget-v2"] a[href]:not([data-testid="now-playing-widget-v2-byline"] a)',
+  '[data-testid="now-playing-widget"] [data-testid="cover-art-button"]',
+  '[data-testid="now-playing-widget-v2"] [data-testid="cover-art-button"]',
+  '[data-testid="cover-art-slot"] a[href]',
+  '[data-testid="track-visual-enhancement"] a[data-testid="context-link"]',
+  '[data-testid="NPV_Panel_OpenDiv"] .main-trackInfo-name a',
+  '.hvJdEwDFPYnCjweD6tWI > :first-child a',
+]) {
+  test(`now-playing target opens and highlights its playlist: ${selector}`, () => {
+    const data = {
+      context: { uri: 'spotify:playlist:abc' },
+      item: { uid: 'row1', uri: 'spotify:track:t1', album: { uri: 'spotify:album:actual' } },
+      index: { pageIndex: 2, pageURI: 'spotify:playlist:abc:page:2', itemIndex: 37 },
+    };
+    const { event, pushed } = clickTitle(data, { target: new Element(selector) });
+    assert.deepEqual(pushed, [{
+      pathname: '/playlist/abc',
+      search: '?uid=row1&uri=spotify%3Atrack%3At1&page=2&pageUri=spotify%3Aplaylist%3Aabc%3Apage%3A2&index=37',
+    }]);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(event.propagationStopped, true);
+
+    for (const modifier of [{ button: 1 }, { metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }]) {
+      const native = clickTitle(data, { target: new Element(selector), ...modifier });
+      assert.deepEqual(native.pushed, []);
+      assert.equal(native.event.defaultPrevented, false);
+    }
+    const unavailable = clickTitle({}, { target: new Element(selector) });
+    assert.deepEqual(unavailable.pushed, []);
+    assert.equal(unavailable.event.defaultPrevented, false);
+  });
+}
 
 test('now-playing view title also opens the playing context', () => {
   const { pushed } = clickTitle(
